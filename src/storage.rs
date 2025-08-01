@@ -1,4 +1,3 @@
-use crate::ftypes::Ino;
 use std::{borrow::Cow, fs::File, os::unix::fs::FileExt};
 
 pub trait Storage {
@@ -31,7 +30,7 @@ impl Storage for RamStorage {
         Cow::from(&self.buffer[start..end])
     }
 
-    fn write(&mut self, offset: usize, data: &[u8]) {
+    fn write(&mut self, _offset: usize, data: &[u8]) {
         self.buffer.extend_from_slice(data);
     }
 }
@@ -42,6 +41,7 @@ pub struct FileStorage {
 }
 
 impl FileStorage {
+    #[allow(dead_code)]
     pub fn create(iden: &str) -> FileStorage {
         let path = format!("/tmp/bf-{}", iden);
         let file = File::options()

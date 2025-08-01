@@ -1,9 +1,9 @@
-use clap::{Arg, ArgAction, Command};
+use clap::{Arg, Command};
 use fuser::{
     FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
     Request,
 };
-use libc::{EEXIST, ENOENT};
+use libc::ENOENT;
 use std::ffi::OsStr;
 use std::time::{Duration, SystemTime};
 
@@ -18,7 +18,8 @@ use ftree::Tree;
 use ftypes::{Dir, ErrNo, File, Ino, Node, NodeItem};
 use storage::{FileStorage, Storage};
 
-use crate::effect::EffectGroup;
+use crate::effect::{EffectGroup, OpType};
+use crate::storage::RamStorage;
 
 const TTL: Duration = Duration::from_secs(1);
 
@@ -27,7 +28,7 @@ struct TestFS {
 }
 
 // Create fresh attributes
-fn fresh_attr(ino: Ino, kind: FileType, uid: u32, gid: u32) -> FileAttr {
+fn fresh_attr(ino: Ino, kind: FileType, mode: u32, uid: u32, gid: u32) -> FileAttr {
     let now = SystemTime::now();
     FileAttr {
         ino: ino as u64,
@@ -38,7 +39,7 @@ fn fresh_attr(ino: Ino, kind: FileType, uid: u32, gid: u32) -> FileAttr {
         ctime: now,
         crtime: now,
         kind,
-        perm: 0o777,
+        perm: mode as u16,
         nlink: 0,
         uid: uid,
         gid: gid,
@@ -48,8 +49,9 @@ fn fresh_attr(ino: Ino, kind: FileType, uid: u32, gid: u32) -> FileAttr {
     }
 }
 
-fn create_storage(parent: u64, name: &OsStr) -> Box<dyn Storage> {
-    let fs = FileStorage::create(&format!("{}-{}", parent, name.to_string_lossy()));
+fn create_storage(ino: Ino) -> Box<dyn Storage> {
+    //let fs = FileStorage::create(&format!("{}", ino));
+    let fs = RamStorage::create();
     Box::new(fs)
 }
 
@@ -93,6 +95,7 @@ impl TestFS {
         req: &Request,
         parent: Ino,
         name: &OsStr,
+        mode: u32,
         kind: FileType,
     ) -> Result<FileAttr, ErrNo> {
         self.access_dir(parent)?; // Check parent folder for permissions
@@ -102,12 +105,10 @@ impl TestFS {
             .create(parent, name.to_string_lossy().to_string())?;
         let item = match kind {
             FileType::Directory => NodeItem::Dir(Dir::default()),
-            FileType::RegularFile => {
-                NodeItem::File(File::create(create_storage(parent as u64, name)))
-            }
+            FileType::RegularFile => NodeItem::File(File::create(create_storage(ino))),
             _ => panic!("!"),
         };
-        let attr = fresh_attr(ino, kind, req.uid(), req.gid());
+        let attr = fresh_attr(ino, kind, mode, req.uid(), req.gid());
         let node = Node {
             parent,
             attr,
@@ -118,19 +119,18 @@ impl TestFS {
         Ok(attr)
     }
 
-    fn erase_node(&mut self, parent: Ino, name: &OsStr) -> Result<(), ErrNo> {
+    fn erase_node(&mut self, parent: Ino, name: &OsStr) -> Result<Node, ErrNo> {
         let ino = self.access_dir(parent)?.0.lookup(name).ok_or(ENOENT)?;
-        if self.tree.erase(ino) {
-            Ok(())
-        } else {
-            Err(ENOENT)
-        }
+        self.tree.erase(ino).ok_or(ENOENT)
     }
 
-    fn play_effects(node: &Node) -> Option<ErrNo> {
+    fn play_effects(node: &Node, op_type: OpType) -> Option<ErrNo> {
         // not flatten'able because of rc borrows
         for group in EffectGroup::climb(&node.effects) {
-            for effect in group.list() {
+            for (effect_type, effect) in group.list() {
+                if (effect_type & op_type).is_empty() {
+                    continue;
+                }
                 if let Some(errno) = effect.apply() {
                     return Some(errno);
                 }
@@ -157,6 +157,36 @@ impl Filesystem for TestFS {
             Ok(node) => reply.attr(&TTL, &node.attr),
             Err(errno) => reply.error(errno),
         }
+    }
+
+    fn setattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        _size: Option<u64>,
+        _atime: Option<fuser::TimeOrNow>,
+        _mtime: Option<fuser::TimeOrNow>,
+        _ctime: Option<SystemTime>,
+        _fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        let node = match self.access_node_mut(ino as Ino) {
+            Ok(node) => node,
+            Err(errno) => return reply.error(errno),
+        };
+
+        if let Some(mode) = mode {
+            node.attr.perm = mode as u16;
+        }
+
+        reply.attr(&TTL, &node.attr);
     }
 
     fn readdir(
@@ -200,11 +230,11 @@ impl Filesystem for TestFS {
         req: &Request<'_>,
         parent: u64,
         name: &OsStr,
-        _mode: u32,
+        mode: u32,
         _umask: u32,
         reply: ReplyEntry,
     ) {
-        match self.create_node(req, parent as Ino, name, FileType::Directory) {
+        match self.create_node(req, parent as Ino, name, mode, FileType::Directory) {
             Ok(attr) => reply.entry(&TTL, &attr, 0),
             Err(errno) => reply.error(errno),
         }
@@ -215,12 +245,12 @@ impl Filesystem for TestFS {
         req: &Request<'_>,
         parent: u64,
         name: &OsStr,
-        _mode: u32,
+        mode: u32,
         _umask: u32,
         _flags: i32,
         reply: fuser::ReplyCreate,
     ) {
-        match self.create_node(req, parent as Ino, name, FileType::RegularFile) {
+        match self.create_node(req, parent as Ino, name, mode, FileType::RegularFile) {
             Ok(attr) => reply.created(&TTL, &attr, 0, attr.ino, 0),
             Err(errno) => reply.error(errno),
         }
@@ -242,7 +272,7 @@ impl Filesystem for TestFS {
             Ok(node) => node,
             Err(errno) => return reply.error(errno),
         };
-        if let Some(errno) = Self::play_effects(node) {
+        if let Some(errno) = Self::play_effects(node, OpType::W) {
             return reply.error(errno);
         }
         if let NodeItem::File(ref mut file) = node.item {
@@ -270,7 +300,7 @@ impl Filesystem for TestFS {
             Ok(node) => node,
             Err(errno) => return reply.error(errno),
         };
-        if let Some(errno) = Self::play_effects(node) {
+        if let Some(errno) = Self::play_effects(node, OpType::R) {
             return reply.error(errno);
         }
         if let NodeItem::File(ref file) = node.item {
@@ -281,16 +311,57 @@ impl Filesystem for TestFS {
         }
     }
 
+    fn rename(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        flags: u32,
+        reply: fuser::ReplyEmpty,
+    ) {
+        let mut node = match self.erase_node(parent as Ino, name) {
+            Ok(node) => node,
+            Err(errno) => return reply.error(errno),
+        };
+        let (ino, parent_effect, nref) = match self
+            .tree
+            .create(newparent as Ino, newname.to_string_lossy().to_string())
+        {
+            Ok(t) => t,
+            Err(errno) => return reply.error(errno),
+        };
+
+        node.parent = newparent as Ino;
+        node.attr.ino = ino as u64;
+
+        // If node had effects, rewire them to parent
+        if let Some(effect) = &node.effects {
+            effect.rewire(parent_effect.clone());
+        }
+        nref.replace(node);
+
+        // If node has no own effects, continue parent chain (if present)
+        if nref.as_ref().unwrap().effects.is_none()
+            && let Some(parent_effect) = parent_effect
+        {
+            self.tree.attach(ino, parent_effect);
+        }
+
+        reply.ok();
+    }
+
     fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
         match self.erase_node(parent as Ino, name) {
-            Ok(()) => reply.ok(),
+            Ok(_) => reply.ok(),
             Err(errno) => reply.error(errno),
         }
     }
 
     fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
         match self.erase_node(parent as Ino, name) {
-            Ok(()) => reply.ok(),
+            Ok(_) => reply.ok(),
             Err(errno) => reply.error(errno),
         }
     }
@@ -309,25 +380,25 @@ fn main() {
     env_logger::init();
 
     let mountpoint = matches.get_one::<String>("MOUNT_POINT").unwrap();
-    let mut options = vec![
+    let options = vec![
         MountOption::RW,
         MountOption::FSName("hello".to_string()),
         MountOption::DefaultPermissions,
         MountOption::AutoUnmount,
-        MountOption::AllowRoot
+        MountOption::AllowRoot,
     ];
 
     let nodes = [
         Node {
             parent: 0,
             item: NodeItem::Dir(Dir::default()),
-            attr: fresh_attr(0, FileType::Directory, 1000, 1001),
+            attr: fresh_attr(0, FileType::Directory, 0x000, 1000, 1001),
             effects: None,
         },
         Node {
             parent: 1,
             item: NodeItem::Dir(Dir::default()),
-            attr: fresh_attr(1, FileType::Directory, 1000, 1001),
+            attr: fresh_attr(1, FileType::Directory, 0o754, 1000, 1001),
             effects: None,
         },
     ];
@@ -336,7 +407,7 @@ fn main() {
         1,
         EffectGroup::new(
             None,
-            [Box::new(effect::Delay {})].map(|b| b as Box<dyn Effect>),
+            [Box::new(effect::Delay {})].map(|b| (OpType::all(), b as Box<dyn Effect>)),
         ),
     );
     fuser::mount2(TestFS { tree }, mountpoint, &options).unwrap();

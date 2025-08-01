@@ -1,9 +1,12 @@
 use fuser::{FileAttr, FileType};
 use std::rc::Rc;
+
+use crate::effect::EffectGroup;
 use crate::storage::Storage;
-use crate::effect::{EffectGroup};
+
 pub type Ino = usize;
 pub type ErrNo = libc::c_int;
+
 
 #[derive(Default)]
 pub struct Dir {
@@ -62,10 +65,10 @@ pub enum NodeItem {
 }
 
 impl NodeItem {
-    pub fn ftype(&self) -> FileType {
+    pub fn _ftype(&self) -> FileType {
         match self {
-            NodeItem::Dir(d) => FileType::Directory,
-            NodeItem::File(f) => FileType::RegularFile
+            NodeItem::Dir(_) => FileType::Directory,
+            NodeItem::File(_) => FileType::RegularFile,
         }
     }
 }
@@ -74,5 +77,5 @@ pub struct Node {
     pub parent: usize,
     pub attr: FileAttr,
     pub item: NodeItem,
-    pub effects: Option<Rc<EffectGroup>>
+    pub effects: Option<Rc<EffectGroup>>,
 }

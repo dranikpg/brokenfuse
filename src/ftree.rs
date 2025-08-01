@@ -1,10 +1,8 @@
 use libc::ENOENT;
-use std::io::empty;
-use std::ops::Deref;
 use std::rc::Rc;
 
 use crate::effect::EffectGroup;
-use crate::ftypes::{ErrNo, File, Ino, Node, NodeItem};
+use crate::ftypes::{ErrNo, Ino, Node, NodeItem};
 
 pub struct Tree {
     nodes: Vec<Option<Node>>,
@@ -19,26 +17,13 @@ impl Tree {
         }
     }
 
-    // TODO: remove
-    pub fn file_mut(&mut self, ino: Ino) -> Option<&mut File> {
-        let node = self.nodes.get_mut(ino)?.as_mut()?;
-        match node.item {
-            NodeItem::File(ref mut file) => Some(file),
-            _ => None,
-        }
-    }
-
-    pub fn get(&self, ino: Ino) -> Option<&Node> {
-        self.nodes.get(ino).map(&Option::as_ref).flatten()
-    }
-
     pub fn get_mut(&mut self, ino: Ino) -> Option<&mut Node> {
         self.nodes.get_mut(ino).map(&Option::as_mut).flatten()
     }
 
-    pub fn all_mut(&mut self) -> impl Iterator<Item = &mut Node> {
-        self.nodes.iter_mut().filter_map(|n| n.as_mut())
-    }
+    //pub fn all_mut(&mut self) -> impl Iterator<Item = &mut Node> {
+    //    self.nodes.iter_mut().filter_map(|n| n.as_mut())
+    //}
 
     pub fn attach(&mut self, ino: Ino, effect: Rc<EffectGroup>) {
         let prev_effects = self.nodes[ino].as_mut().unwrap().effects.take();
@@ -50,11 +35,11 @@ impl Tree {
             // Determine conditions for replacing node effect and searching further
             match (&node.effects, &prev_effects) {
                 (None, _) => (),
-                (Some(ref e1), Some(ref e2)) if Rc::ptr_eq(e1, e2) => (),
+                (Some(e1), Some(e2)) if Rc::ptr_eq(e1, e2) => (),
                 (Some(_), None) => panic!("broken effect tree"),
                 (Some(_), _) => continue, // unequal effects
             };
-            
+
             println!("Attaching group to {}", node.attr.ino);
             node.effects.replace(effect.clone());
             if let NodeItem::Dir(ref dir) = node.item {
@@ -100,15 +85,25 @@ impl Tree {
     }
 
     // Erase node
-    pub fn erase(&mut self, ino: Ino) -> bool {
-        if let Some(node) = self.nodes[ino].take() {
-            match self.nodes[node.parent].as_mut().unwrap().item {
+    pub fn erase(&mut self, ino: Ino) -> Option<Node> {
+        if let Some(mut node) = self.nodes[ino].take() {
+            let parent = self.nodes[node.parent].as_mut().unwrap();
+            match parent.item {
                 NodeItem::Dir(ref mut dir) => dir.remove(ino),
                 _ => panic!("Corrupted tree: non-directory parent"),
             };
-            true
+
+            // Remove effects if node doesn't own them
+            match (&parent.effects, &node.effects) {
+                (Some(e1), Some(e2)) if Rc::ptr_eq(e1, e2) => {
+                    node.effects.take();
+                }
+                _ => (),
+            };
+
+            Some(node)
         } else {
-            false
+            None
         }
     }
 }
