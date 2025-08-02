@@ -1,8 +1,11 @@
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{effect::Effect, ftypes::ErrNo};
+use crate::{
+    effect::{Effect, EffectResult},
+    ftypes::ErrNo,
+};
 
 // Delay processing by X ms. {"millis": 100}
 #[derive(Serialize, Deserialize)]
@@ -12,11 +15,8 @@ pub struct Delay {
 }
 
 impl Effect for Delay {
-    fn apply(&self) -> Option<ErrNo> {
-        println!("Duration millis {}", self.duration_ms);
-        std::thread::sleep(Duration::from_millis(self.duration_ms));
-        println!("done");
-        None
+    fn apply(&self) -> EffectResult {
+        EffectResult::Delay(self.duration_ms)
     }
 
     fn serialize(&self) -> serde_json::Value {
@@ -27,14 +27,15 @@ impl Effect for Delay {
 #[derive(Serialize, Deserialize)]
 #[serde(untagged)]
 enum FlakeyCondition {
-    Always{},
+    Always { always: bool },
     Prob { prob: f32 },
     Interval { avail: f64, unavail: f64 },
 }
 
 // Return `errno` (EIO by default) with:
-// 1. `prob`% probability. {"prob": 0.3, "errno": 5}
-// 2. `avail`/`unavail` intervals in seconds {"avail": 5, "unavail": 10}
+// 1. Always or never {"always": true/false }
+// 2. `prob`% probability {"prob": 0.3, "errno": 5}
+// 3. `avail`/`unavail` intervals in seconds {"avail": 5, "unavail": 10}
 #[derive(Serialize, Deserialize)]
 pub struct Flakey {
     #[serde(flatten)]
@@ -50,12 +51,17 @@ impl Flakey {
 }
 
 impl Effect for Flakey {
-    fn apply(&self) -> Option<ErrNo> {
-        match self.cond {
-            FlakeyCondition::Always{} => Some(self.errno),
-            FlakeyCondition::Prob { prob } => {
-                Some(self.errno).take_if(|_| rand::rng().random::<f32>() > prob)
+    fn apply(&self) -> EffectResult {
+        let ret = |b| {
+            if b {
+                EffectResult::Error(self.errno)
+            } else {
+                EffectResult::Ack
             }
+        };
+        match self.cond {
+            FlakeyCondition::Always { always } => ret(always),
+            FlakeyCondition::Prob { prob } => ret(rand::rng().random::<f32>() <= prob),
             FlakeyCondition::Interval { avail, unavail } => {
                 let passed_ms = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -64,8 +70,7 @@ impl Effect for Flakey {
                     - 1754140900000; // smaller value is float friendly                
 
                 let rem = (passed_ms as f64 / 1000f64) % (avail + unavail);
-                println!("passed {}, rem {}", passed_ms, rem);
-                Some(self.errno).take_if(|_| rem > avail)
+                ret(rem <= avail)
             }
         }
     }

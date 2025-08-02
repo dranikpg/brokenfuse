@@ -1,10 +1,9 @@
+use fuser::FileAttr;
+use serde::Serialize;
 use std::cell::Cell;
 
 use crate::effect::EffectGroup;
 use crate::storage::Storage;
-use fuser::{FileAttr, FileType};
-use serde::Serialize;
-
 pub type Ino = usize;
 pub type ErrNo = libc::c_int;
 
@@ -96,15 +95,6 @@ impl File {
 pub enum NodeItem {
     File(File),
     Dir(Dir),
-}
-
-impl NodeItem {
-    pub fn _ftype(&self) -> FileType {
-        match self {
-            NodeItem::Dir(_) => FileType::Directory,
-            NodeItem::File(_) => FileType::RegularFile,
-        }
-    }
 }
 
 pub struct Node {

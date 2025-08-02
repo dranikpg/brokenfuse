@@ -30,8 +30,13 @@ impl Storage for RamStorage {
         Cow::from(&self.buffer[start..end])
     }
 
-    fn write(&mut self, _offset: usize, data: &[u8]) {
-        self.buffer.extend_from_slice(data);
+    fn write(&mut self, offset: usize, data: &[u8]) {
+        let end = offset + data.len();
+        if end >= self.buffer.len() {
+            self.buffer.resize(end, 0);
+        }
+        let dest: &mut [u8] = &mut self.buffer[offset..offset + data.len()];
+        dest.copy_from_slice(data);
     }
 }
 

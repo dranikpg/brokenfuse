@@ -1,13 +1,20 @@
 use bitflags::bitflags;
 use serde_json::Value as JValue;
 use std::str::FromStr;
+use std::time::Duration;
 
-use crate::ftypes::ErrNo;
-
+use crate::ftree::Tree;
+use crate::ftypes::{ErrNo, Ino};
 mod detail;
 
+pub enum EffectResult {
+    Ack,          // Acknowledge operation, don't do anything
+    Error(ErrNo), // Cause error
+    Delay(u64),   // Sleep ms
+}
+
 pub trait Effect {
-    fn apply(&self) -> Option<ErrNo>;
+    fn apply(&self) -> EffectResult;
     fn serialize(&self) -> serde_json::Value;
 }
 
@@ -122,10 +129,51 @@ impl EffectGroup {
     }
 
     pub fn serialize(&self) -> JValue {
-        let mut map: serde_json::Map<String, JValue> = serde_json::Map::new();
+        let mut list: Vec<JValue> = vec![];
         for effect in self {
-            map.insert(effect.name.to_owned(), effect.serialize());
+            let mut map = serde_json::Map::<String, JValue>::new();
+            map.insert("name".to_owned(), JValue::String(effect.name.to_owned()));
+            map.insert("effect".to_owned(), effect.serialize());
+            list.push(JValue::Object(map));
         }
-        JValue::Object(map)
+        JValue::Array(list)
+    }
+}
+
+pub fn run(tree: &Tree, ino: Ino, fop: OpType) -> (u64, Option<ErrNo>) {
+    let mut sleep_ms: u64 = 0;
+    let mut first_errno: Option<ErrNo> = None;
+    'outer: for node in tree.climb(ino) {
+        for DefinedEffect { effect, op, .. } in &node.effects {
+            if (fop & *op).is_empty() {
+                continue;
+            }
+            match effect.apply() {
+                EffectResult::Ack => (),
+                EffectResult::Error(errno) => {
+                    first_errno = Some(errno);
+                    break 'outer;
+                }
+                EffectResult::Delay(ms) => {
+                    sleep_ms += ms;
+                }
+            }
+        }
+    }
+    (sleep_ms, first_errno)
+}
+
+// Reply, possibly delayed
+pub fn reply(sleep_ms: u64, replier: impl FnOnce() + Send + 'static) {
+    if sleep_ms >= 5 {
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(sleep_ms));
+            replier();
+        });
+    } else {
+        if sleep_ms > 0 {
+            std::thread::sleep(Duration::from_millis(sleep_ms));
+        }
+        replier()
     }
 }

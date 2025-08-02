@@ -1,5 +1,4 @@
 use libc::ENOENT;
-use std::rc::Rc;
 
 use crate::ftypes::{ErrNo, Ino, Node, NodeItem};
 
@@ -22,10 +21,6 @@ impl Tree {
 
     pub fn get_mut(&mut self, ino: Ino) -> Option<&mut Node> {
         self.nodes.get_mut(ino).map(&Option::as_mut).flatten()
-    }
-
-    pub fn list_mut(&mut self) -> impl Iterator<Item = &mut Node> {
-        self.nodes.iter_mut().flat_map(|n| n)
     }
 
     pub fn climb(&self, ino: Ino) -> impl Iterator<Item = &Node> {

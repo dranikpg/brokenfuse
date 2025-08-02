@@ -11,13 +11,13 @@ mod effect;
 mod ftree;
 mod ftypes;
 mod storage;
-mod utility;
+mod xaops;
 
 use ftree::Tree;
 use ftypes::{Dir, ErrNo, File, Ino, Node, NodeItem};
 use storage::{FileStorage, Storage};
 
-use crate::effect::{DefinedEffect, EffectGroup, OpType};
+use crate::effect::{EffectGroup, OpType};
 use crate::storage::RamStorage;
 
 const TTL: Duration = Duration::from_secs(1);
@@ -121,21 +121,6 @@ impl TestFS {
     fn erase_node(&mut self, parent: Ino, name: &OsStr) -> Result<Node, ErrNo> {
         let ino = self.access_dir(parent)?.0.lookup(name).ok_or(ENOENT)?;
         self.tree.erase(ino).ok_or(ENOENT)
-    }
-
-    fn play_effects(&self, ino: Ino, op_type: OpType) -> Option<ErrNo> {
-        for node in self.tree.climb(ino) {
-            for effect in &node.effects {
-                if (effect.op & op_type).is_empty() {
-                    continue;
-                }
-
-                if let Some(errno) = effect.effect.apply() {
-                    return Some(errno);
-                }
-            }
-        }
-        None
     }
 }
 
@@ -267,27 +252,36 @@ impl Filesystem for TestFS {
         _lock_owner: Option<u64>,
         reply: fuser::ReplyWrite,
     ) {
+        let (ef_sleep, ef_err) = effect::run(&self.tree, ino as Ino, OpType::W);
+        if let Some(errno) = ef_err {
+            effect::reply(ef_sleep, move || reply.error(errno));
+            return;
+        }
+
         let node = match self.access_node_mut(ino as Ino) {
             Ok(node) => node,
             Err(errno) => return reply.error(errno),
         };
 
-        if let NodeItem::File(ref mut file) = node.item {
+        let written = if let NodeItem::File(ref mut file) = node.item {
             file.storage_mut().write(offset as usize, data);
             node.attr.size = file.storage().len() as u64;
             node.attr.blocks = node.attr.size / (node.attr.blksize as u64) + 1;
 
             file.stats.writes.incr();
             file.stats.write_volume.record(data.len());
+            Some(data.len())
         } else {
-            return reply.error(ENOENT);
-        }
+            None
+        };
 
-        if let Some(errno) = self.play_effects(ino as Ino, OpType::W) {
-            reply.error(errno);
-        } else {
-            reply.written(data.len() as u32);
-        }
+        effect::reply(ef_sleep, move || {
+            if let Some(written) = written {
+                reply.written(written as u32);
+            } else {
+                reply.error(ENOENT)
+            }
+        });
     }
 
     fn read(
@@ -301,6 +295,12 @@ impl Filesystem for TestFS {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
+        let (ef_sleep, ef_err) = effect::run(&self.tree, ino as Ino, OpType::R);
+        if let Some(errno) = ef_err {
+            effect::reply(ef_sleep, move || reply.error(errno));
+            return;
+        }
+
         let node = match self.access_node(ino as Ino) {
             Ok(node) => node,
             Err(errno) => return reply.error(errno),
@@ -313,16 +313,18 @@ impl Filesystem for TestFS {
                 .into_owned();
             file.stats.reads.incr();
             file.stats.read_volume.record(data.len());
-            data
+            Some(data)
         } else {
-            return reply.error(ENOENT);
+            None
         };
 
-        if let Some(errno) = self.play_effects(ino as Ino, OpType::R) {
-            reply.error(errno);
-        } else {
-            reply.data(&data);
-        }
+        effect::reply(ef_sleep, move || {
+            if let Some(data) = data {
+                reply.data(&data)
+            } else {
+                reply.error(ENOENT)
+            }
+        });
     }
 
     fn rename(
@@ -386,30 +388,11 @@ impl Filesystem for TestFS {
         size: u32,
         reply: fuser::ReplyXattr,
     ) {
-        let name = name.to_string_lossy();
-        let send_reply = |out: &str, reply: fuser::ReplyXattr| {
-            if size == 0 {
-                reply.size(out.as_bytes().len() as u32);
-            } else {
-                reply.data(out.as_bytes())
-            } // todo size check
+        match xaops::get(&self.tree, ino as Ino, &name.to_string_lossy()) {
+            Some(v) if size as usize > v.as_bytes().len() => reply.data(v.as_bytes()),
+            Some(v) => reply.size(v.as_bytes().len() as u32),
+            None => reply.error(ENOENT),
         };
-
-        if name == "bk.effect" {
-            let node = self.tree.get_mut(ino as Ino).unwrap();
-            let out = node.effects.serialize().to_string();
-            send_reply(&out, reply);
-        } else if name == "bk.stats" {
-            let node = self.tree.get(ino as Ino).unwrap();
-            if let NodeItem::File(ref file) = node.item {
-                let out = serde_json::to_string(&file.stats).unwrap();
-                send_reply(&out, reply);
-            } else {
-                reply.error(ENOENT);
-            }
-        } else {
-            reply.error(ENOENT);
-        }
     }
 
     fn setxattr(
@@ -422,14 +405,10 @@ impl Filesystem for TestFS {
         _position: u32,
         reply: fuser::ReplyEmpty,
     ) {
-        let name = name.to_string_lossy();
-        if let Some(ename) = name.strip_prefix("bk.effect.") {
-            let effect = DefinedEffect::create(ename, &String::from_utf8_lossy(value)).unwrap();
-            self.tree.get_mut(ino as Ino).unwrap().effects.add(effect);
+        match xaops::set(&mut self.tree, ino as Ino, &name.to_string_lossy(), &String::from_utf8_lossy(value)) {
+            Some(_) => reply.ok(),
+            None => reply.error(ENOENT),
         }
-
-        println!("Set xattr {} {}", name, String::from_utf8_lossy(value));
-        reply.ok();
     }
 
     fn removexattr(
@@ -439,16 +418,10 @@ impl Filesystem for TestFS {
         name: &OsStr,
         reply: fuser::ReplyEmpty,
     ) {
-        let name = name.to_string_lossy();
-        if name == "bk.effect" {
-            self.tree.get_mut(ino as Ino).unwrap().effects.clear();
+        match xaops::remove(&mut self.tree, ino as Ino, &name.to_string_lossy()) {
+            Some(_) => reply.ok(),
+            None => reply.error(ENOENT)
         }
-
-        if let Some(ename) = name.strip_prefix("bk.effect.") {
-            self.tree.get_mut(ino as Ino).unwrap().effects.remove(ename);
-        }
-
-        reply.ok();
     }
 }
 
@@ -487,7 +460,7 @@ fn main() {
             effects: EffectGroup::default(),
         },
     ];
-    let mut tree = Tree::initial(nodes);
+    let tree = Tree::initial(nodes);
     //tree.attach(
     //    1,
     //    Some(EffectGroup::new(
