@@ -1,17 +1,14 @@
-use std::{collections::HashMap, ffi::os_str::Display, str::FromStr};
+use bitflags::bitflags;
+use serde_json::Value as JValue;
+use std::str::FromStr;
 
-use crate::{
-    effect::{self, detail::Delay},
-    ftypes::ErrNo,
-};
-use bitflags::{Flags, bitflags};
-use tinyjson::JsonValue;
+use crate::ftypes::ErrNo;
 
 mod detail;
 
 pub trait Effect {
     fn apply(&self) -> Option<ErrNo>;
-    fn serialize(&self) -> Vec<(&'static str, JsonValue)>;
+    fn serialize(&self) -> serde_json::Value;
 }
 
 bitflags! {
@@ -52,16 +49,33 @@ pub struct DefinedEffect {
 
 impl DefinedEffect {
     pub fn create(name: &str, data: &str) -> Result<Self, String> {
-        let parsed: JsonValue = data.parse().unwrap();
-        let mut map: HashMap<_, _> = parsed.try_into().unwrap();
+        let mut parsed: JValue = serde_json::from_str(data).unwrap();
         let op: OpType = {
-            let op_j = map.remove("op").unwrap();
-            let op_str: String = op_j.try_into().unwrap();
+            let op_str = parsed
+                .as_object_mut()
+                .unwrap()
+                .remove("op")
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned();
             op_str.parse().unwrap()
         };
-        let (sname, effect): (&'static str, Box<dyn Effect>) = match name {
-            "delay" => ("delay", Box::new(Delay::new(map).unwrap())),
-            _ => return Err(format!("")),
+
+        macro_rules! match_effect {
+            ($($name:literal => $efft:ty),*) => {
+                match name {
+                    $($name => {
+                        let pt: $efft = serde_json::from_value(parsed).unwrap();
+                        ($name, Box::new(pt))
+                    },)*
+                    _ => return Err(format!("")),
+                }
+            };
+        }
+
+        let (sname, effect): (&'static str, Box<dyn Effect>) = match_effect! {
+            "delay" => detail::Delay, "flakey" => detail::Flakey
         };
         Ok(DefinedEffect {
             name: sname,
@@ -70,15 +84,13 @@ impl DefinedEffect {
         })
     }
 
-    pub fn serialize(&self) -> JsonValue {
-        let mut map: HashMap<String, JsonValue> = self
-            .effect
-            .serialize()
-            .into_iter()
-            .map(|(n, v)| (n.to_owned(), v))
-            .collect();
-        map.insert("op".to_owned(), JsonValue::String(format!("{}", self.op)));
-        JsonValue::Object(map)
+    pub fn serialize(&self) -> JValue {
+        let mut map = match self.effect.serialize() {
+            JValue::Object(obj) => obj,
+            _ => panic!("bad serialization"),
+        };
+        map.insert("op".to_owned(), JValue::String(format!("{}", self.op)));
+        JValue::Object(map)
     }
 }
 
@@ -109,11 +121,11 @@ impl EffectGroup {
         self.effects.push(nde);
     }
 
-    pub fn serialize(&self) -> JsonValue {
-        let mut map: HashMap<String, JsonValue> = HashMap::new();
+    pub fn serialize(&self) -> JValue {
+        let mut map: serde_json::Map<String, JValue> = serde_json::Map::new();
         for effect in self {
             map.insert(effect.name.to_owned(), effect.serialize());
         }
-        JsonValue::Object(map)
+        JValue::Object(map)
     }
 }

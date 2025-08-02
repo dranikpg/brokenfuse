@@ -276,11 +276,14 @@ impl Filesystem for TestFS {
             file.storage_mut().write(offset as usize, data);
             node.attr.size = file.storage().len() as u64;
             node.attr.blocks = node.attr.size / (node.attr.blksize as u64) + 1;
+
+            file.stats.writes.incr();
+            file.stats.write_volume.record(data.len());
         } else {
             return reply.error(ENOENT);
         }
 
-        if let Some(errno) = self.play_effects(ino as Ino, OpType::R) {
+        if let Some(errno) = self.play_effects(ino as Ino, OpType::W) {
             reply.error(errno);
         } else {
             reply.written(data.len() as u32);
@@ -304,9 +307,13 @@ impl Filesystem for TestFS {
         };
 
         let data = if let NodeItem::File(ref file) = node.item {
-            file.storage()
+            let data = file
+                .storage()
                 .read(offset as usize, size as usize)
-                .into_owned()
+                .into_owned();
+            file.stats.reads.incr();
+            file.stats.read_volume.record(data.len());
+            data
         } else {
             return reply.error(ENOENT);
         };
@@ -380,14 +387,26 @@ impl Filesystem for TestFS {
         reply: fuser::ReplyXattr,
     ) {
         let name = name.to_string_lossy();
-        if name == "bk.effect" {
-            let node = self.tree.get_mut(ino as Ino).unwrap();
-            let out = node.effects.serialize().stringify().unwrap();
+        let send_reply = |out: &str, reply: fuser::ReplyXattr| {
             if size == 0 {
                 reply.size(out.as_bytes().len() as u32);
             } else {
                 reply.data(out.as_bytes())
             } // todo size check
+        };
+
+        if name == "bk.effect" {
+            let node = self.tree.get_mut(ino as Ino).unwrap();
+            let out = node.effects.serialize().to_string();
+            send_reply(&out, reply);
+        } else if name == "bk.stats" {
+            let node = self.tree.get(ino as Ino).unwrap();
+            if let NodeItem::File(ref file) = node.item {
+                let out = serde_json::to_string(&file.stats).unwrap();
+                send_reply(&out, reply);
+            } else {
+                reply.error(ENOENT);
+            }
         } else {
             reply.error(ENOENT);
         }

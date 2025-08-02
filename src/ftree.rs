@@ -16,6 +16,10 @@ impl Tree {
         }
     }
 
+    pub fn get(&self, ino: Ino) -> Option<&Node> {
+        self.nodes.get(ino).map(&Option::as_ref).flatten()
+    }
+
     pub fn get_mut(&mut self, ino: Ino) -> Option<&mut Node> {
         self.nodes.get_mut(ino).map(&Option::as_mut).flatten()
     }

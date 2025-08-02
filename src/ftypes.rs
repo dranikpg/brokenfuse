@@ -1,10 +1,12 @@
-use fuser::{FileAttr, FileType};
+use std::cell::Cell;
+
 use crate::effect::EffectGroup;
 use crate::storage::Storage;
+use fuser::{FileAttr, FileType};
+use serde::Serialize;
 
 pub type Ino = usize;
 pub type ErrNo = libc::c_int;
-
 
 #[derive(Default)]
 pub struct Dir {
@@ -39,13 +41,47 @@ impl Dir {
     }
 }
 
+#[derive(Default)]
+pub struct ImmutCounter(Cell<usize>);
+
+impl ImmutCounter {
+    pub fn record(&self, u: impl TryInto<usize>) {
+        self.0.update(|v| v + (u.try_into().unwrap_or(0)));
+    }
+    pub fn incr(&self) {
+        self.record(1usize);
+    }
+}
+
+impl Serialize for ImmutCounter {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_u64(self.0.get() as u64)
+    }
+}
+
+#[derive(Default, Serialize)]
+pub struct FileStats {
+    pub reads: ImmutCounter,
+    pub read_volume: ImmutCounter,
+    pub writes: ImmutCounter,
+    pub write_volume: ImmutCounter,
+    pub errors: ImmutCounter,
+}
+
 pub struct File {
     storage: Box<dyn Storage>,
+    pub stats: FileStats,
 }
 
 impl File {
     pub fn create(storage: Box<dyn Storage>) -> File {
-        File { storage }
+        File {
+            storage,
+            stats: FileStats::default(),
+        }
     }
 
     pub fn storage(&self) -> &dyn Storage {
