@@ -1,6 +1,4 @@
 use fuser::{FileAttr, FileType};
-use std::rc::Rc;
-
 use crate::effect::EffectGroup;
 use crate::storage::Storage;
 
@@ -77,5 +75,5 @@ pub struct Node {
     pub parent: usize,
     pub attr: FileAttr,
     pub item: NodeItem,
-    pub effects: Option<Rc<EffectGroup>>,
+    pub effects: EffectGroup,
 }
