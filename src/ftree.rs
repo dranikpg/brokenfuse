@@ -17,6 +17,10 @@ impl Tree {
         }
     }
 
+    pub fn count(&self) -> usize {
+        self.nodes.iter().filter(|n| n.is_some()).count()
+    }
+
     pub fn get(&self, ino: Ino) -> Option<&Node> {
         self.nodes.get(ino).map(&Option::as_ref).flatten()
     }

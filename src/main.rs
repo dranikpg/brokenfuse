@@ -1,4 +1,4 @@
-use clap::{Arg, Command};
+use clap::Parser;
 use fuser::{
     FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
     Request,
@@ -15,15 +15,14 @@ mod xaops;
 
 use ftree::Tree;
 use ftypes::{Dir, ErrNo, File, Ino, Node, NodeItem};
-use storage::{FileStorage, Storage};
 
 use crate::effect::{EffectGroup, OpType};
-use crate::storage::RamStorage;
 
 const TTL: Duration = Duration::from_secs(1);
 
 struct TestFS {
     tree: ftree::Tree,
+    sfactory: Box<dyn storage::Factory>,
 }
 
 // Create fresh attributes
@@ -43,15 +42,9 @@ fn fresh_attr(ino: Ino, kind: FileType, flags: u32, mode: u32, uid: u32, gid: u3
         uid: uid,
         gid: gid,
         rdev: 0,
-        blksize: 512,
+        blksize: 4096,
         flags,
     }
-}
-
-fn create_storage(ino: Ino) -> Box<dyn Storage> {
-    //let fs = FileStorage::create(&format!("{}", ino));
-    let fs = RamStorage::create();
-    Box::new(fs)
 }
 
 impl TestFS {
@@ -103,7 +96,10 @@ impl TestFS {
             .create(parent, name.to_string_lossy().to_string())?;
         let item = match kind {
             FileType::Directory => NodeItem::Dir(Dir::default()),
-            FileType::RegularFile => NodeItem::File(File::create(create_storage(ino))),
+            FileType::RegularFile => {
+                let storage = self.sfactory.create(ino);
+                NodeItem::File(File::create(storage))
+            }
             _ => panic!("!"),
         };
         let attr = fresh_attr(ino, kind, flags, mode, req.uid(), req.gid());
@@ -441,32 +437,51 @@ impl Filesystem for TestFS {
     }
 
     fn fallocate(
-            &mut self,
-            _req: &Request<'_>,
-            ino: u64,
-            fh: u64,
-            offset: i64,
-            length: i64,
-            mode: i32,
-            reply: fuser::ReplyEmpty,
-        ) {
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        offset: i64,
+        length: i64,
+        mode: i32,
+        reply: fuser::ReplyEmpty,
+    ) {
         reply.ok();
+    }
+
+    fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: fuser::ReplyStatfs) {
+        let storage::Stat { blocks, bavail } = self.sfactory.statfs();
+        reply.statfs(
+            blocks,
+            bavail,
+            bavail,
+            self.tree.count() as u64,
+            100500,
+            4096,
+            255,
+            0,
+        );
     }
 }
 
+// Broken fuse FS
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    // Mount point of filesystem
+    #[arg(value_name = "MOUNT_POINT", index = 1)]
+    mount_path: String,
+
+    // Pass through file storage
+    #[arg(short, long)]
+    passthrough: Option<String>,
+}
+
 fn main() {
-    let matches = Command::new("brokenfuse")
-        .version("1.0")
-        .arg(
-            Arg::new("MOUNT_POINT")
-                .required(true)
-                .index(1)
-                .help("Act as a client, and mount FUSE at given path"),
-        )
-        .get_matches();
+    let args = Args::parse();
     env_logger::init();
 
-    let mountpoint = matches.get_one::<String>("MOUNT_POINT").unwrap();
+    let mountpoint = args.mount_path;
     let options = vec![
         MountOption::RW,
         MountOption::FSName("hello".to_string()),
@@ -490,12 +505,10 @@ fn main() {
         },
     ];
     let tree = Tree::initial(nodes);
-    //tree.attach(
-    //    1,
-    //    Some(EffectGroup::new(
-    //        None,
-    //        [Box::new(effect::Delay {})].map(|b| (OpType::all(), b as Box<dyn Effect>)),
-    //    )),
-    //);
-    fuser::mount2(TestFS { tree }, mountpoint, &options).unwrap();
+    let sfactory = if let Some(path) = args.passthrough {
+        Box::new(storage::FileSFactory::new(&path)) as Box<dyn storage::Factory>
+    } else {
+        Box::new(storage::RamSFactory)
+    };
+    fuser::mount2(TestFS { tree, sfactory }, mountpoint, &options).unwrap();
 }
