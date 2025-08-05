@@ -1,3 +1,5 @@
+use std::{alloc::System, time::SystemTime};
+
 use libc::ENOENT;
 
 use crate::ftypes::{ErrNo, Ino, Node, NodeItem};
@@ -26,23 +28,26 @@ impl Tree {
     pub fn climb(&self, ino: Ino) -> impl Iterator<Item = &Node> {
         struct It<'a> {
             ino: Option<Ino>,
-            tree: &'a Tree
+            tree: &'a Tree,
         }
-        impl <'a> Iterator for It<'a> {
+        impl<'a> Iterator for It<'a> {
             type Item = &'a Node;
-        
+
             fn next(&mut self) -> Option<Self::Item> {
                 let ino = self.ino?;
                 let node = self.tree.nodes[ino].as_ref()?;
                 if node.parent != ino {
                     self.ino = Some(node.parent);
-                } else  {
+                } else {
                     self.ino = None;
                 }
                 Some(node)
             }
         }
-        It{ino: Some(ino), tree: &self}
+        It {
+            ino: Some(ino),
+            tree: &self,
+        }
     }
 
     // Create entry for node and return reference to it
@@ -53,17 +58,20 @@ impl Tree {
             self.nodes.push(None);
         }
 
-        if let NodeItem::Dir(ref mut dir) = self
+        let parent = self
             .nodes
             .get_mut(parent)
             .ok_or(ENOENT)?
             .as_mut()
-            .ok_or(ENOENT)?
-            .item
-        {
+            .ok_or(ENOENT)?;
+        if let NodeItem::Dir(ref mut dir) = parent.item {
             if dir.lookup(&name).is_none() {
                 let ino = self.freelist.pop().unwrap();
                 dir.add(ino, name);
+                parent.attr.mtime = SystemTime::now();
+                parent.attr.ctime = SystemTime::now();
+                parent.attr.blocks = 1;
+                parent.attr.size += 1;
                 Ok((ino, &mut self.nodes[ino]))
             } else {
                 Err(libc::EEXIST)
@@ -76,11 +84,17 @@ impl Tree {
     // Erase node
     pub fn erase(&mut self, ino: Ino) -> Option<Node> {
         let node = self.nodes[ino].take()?;
+        self.freelist.push(ino);
 
         // Erase from parent
         let parent = self.nodes[node.parent].as_mut().unwrap();
         match parent.item {
-            NodeItem::Dir(ref mut dir) => dir.remove(ino),
+            NodeItem::Dir(ref mut dir) => {
+                parent.attr.mtime = SystemTime::now();
+                parent.attr.ctime = SystemTime::now();
+                parent.attr.size -= 1;
+                dir.remove(ino);
+            }
             _ => panic!("Corrupted tree: non-directory parent"),
         };
 

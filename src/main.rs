@@ -27,7 +27,7 @@ struct TestFS {
 }
 
 // Create fresh attributes
-fn fresh_attr(ino: Ino, kind: FileType, mode: u32, uid: u32, gid: u32) -> FileAttr {
+fn fresh_attr(ino: Ino, kind: FileType, flags: u32, mode: u32, uid: u32, gid: u32) -> FileAttr {
     let now = SystemTime::now();
     FileAttr {
         ino: ino as u64,
@@ -44,7 +44,7 @@ fn fresh_attr(ino: Ino, kind: FileType, mode: u32, uid: u32, gid: u32) -> FileAt
         gid: gid,
         rdev: 0,
         blksize: 512,
-        flags: 0,
+        flags,
     }
 }
 
@@ -96,9 +96,8 @@ impl TestFS {
         name: &OsStr,
         mode: u32,
         kind: FileType,
+        flags: u32,
     ) -> Result<FileAttr, ErrNo> {
-        self.access_dir(parent)?; // Check parent folder for permissions
-
         let (ino, nref) = self
             .tree
             .create(parent, name.to_string_lossy().to_string())?;
@@ -107,7 +106,7 @@ impl TestFS {
             FileType::RegularFile => NodeItem::File(File::create(create_storage(ino))),
             _ => panic!("!"),
         };
-        let attr = fresh_attr(ino, kind, mode, req.uid(), req.gid());
+        let attr = fresh_attr(ino, kind, flags, mode, req.uid(), req.gid());
         let node = Node {
             parent,
             attr,
@@ -218,8 +217,11 @@ impl Filesystem for TestFS {
         _umask: u32,
         reply: ReplyEntry,
     ) {
-        match self.create_node(req, parent as Ino, name, mode, FileType::Directory) {
-            Ok(attr) => reply.entry(&TTL, &attr, 0),
+        match self.create_node(req, parent as Ino, name, mode, FileType::Directory, 0) {
+            Ok(attr) => {
+                println!("Replying {:?}", attr);
+                reply.entry(&TTL, &attr, 0)
+            }
             Err(errno) => reply.error(errno),
         }
     }
@@ -231,10 +233,17 @@ impl Filesystem for TestFS {
         name: &OsStr,
         mode: u32,
         _umask: u32,
-        _flags: i32,
+        flags: i32,
         reply: fuser::ReplyCreate,
     ) {
-        match self.create_node(req, parent as Ino, name, mode, FileType::RegularFile) {
+        match self.create_node(
+            req,
+            parent as Ino,
+            name,
+            mode,
+            FileType::RegularFile,
+            flags as u32,
+        ) {
             Ok(attr) => reply.created(&TTL, &attr, 0, attr.ino, 0),
             Err(errno) => reply.error(errno),
         }
@@ -266,7 +275,7 @@ impl Filesystem for TestFS {
         let written = if let NodeItem::File(ref mut file) = node.item {
             file.storage_mut().write(offset as usize, data);
             node.attr.size = file.storage().len() as u64;
-            node.attr.blocks = node.attr.size / (node.attr.blksize as u64) + 1;
+            node.attr.blocks = (node.attr.size / (node.attr.blksize as u64)) + 1;
 
             file.stats.writes.incr();
             file.stats.write_volume.record(data.len());
@@ -349,8 +358,10 @@ impl Filesystem for TestFS {
             Err(errno) => return reply.error(errno),
         };
 
+        assert!(node.attr.ino == ino as u64);
         node.parent = newparent as Ino;
-        node.attr.ino = ino as u64;
+        node.attr.ctime = SystemTime::now();
+
         nref.replace(node);
         reply.ok();
     }
@@ -405,7 +416,12 @@ impl Filesystem for TestFS {
         _position: u32,
         reply: fuser::ReplyEmpty,
     ) {
-        match xaops::set(&mut self.tree, ino as Ino, &name.to_string_lossy(), &String::from_utf8_lossy(value)) {
+        match xaops::set(
+            &mut self.tree,
+            ino as Ino,
+            &name.to_string_lossy(),
+            &String::from_utf8_lossy(value),
+        ) {
             Some(_) => reply.ok(),
             None => reply.error(ENOENT),
         }
@@ -420,8 +436,21 @@ impl Filesystem for TestFS {
     ) {
         match xaops::remove(&mut self.tree, ino as Ino, &name.to_string_lossy()) {
             Some(_) => reply.ok(),
-            None => reply.error(ENOENT)
+            None => reply.error(ENOENT),
         }
+    }
+
+    fn fallocate(
+            &mut self,
+            _req: &Request<'_>,
+            ino: u64,
+            fh: u64,
+            offset: i64,
+            length: i64,
+            mode: i32,
+            reply: fuser::ReplyEmpty,
+        ) {
+        reply.ok();
     }
 }
 
@@ -450,13 +479,13 @@ fn main() {
         Node {
             parent: 0,
             item: NodeItem::Dir(Dir::default()),
-            attr: fresh_attr(0, FileType::Directory, 0x000, 1000, 1001),
+            attr: fresh_attr(0, FileType::Directory, 0, 0x000, 1000, 1001),
             effects: EffectGroup::default(),
         },
         Node {
             parent: 1,
             item: NodeItem::Dir(Dir::default()),
-            attr: fresh_attr(1, FileType::Directory, 0o754, 1000, 1001),
+            attr: fresh_attr(1, FileType::Directory, 0, 0o754, 1000, 1001),
             effects: EffectGroup::default(),
         },
     ];
@@ -469,6 +498,4 @@ fn main() {
     //    )),
     //);
     fuser::mount2(TestFS { tree }, mountpoint, &options).unwrap();
-
-    println!()
 }

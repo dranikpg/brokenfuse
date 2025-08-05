@@ -47,10 +47,10 @@ pub fn remove(tree: &mut Tree, ino: Ino, name: &str) -> Option<()> {
             tree.get_mut(ino as Ino)?.effects.clear();
             Some(())
         }
-        name if name.starts_with("bf.effect") => {
+        name if name.starts_with("bf.effect.") => {
             tree.get_mut(ino as Ino)?
                 .effects
-                .remove(name.strip_prefix("bf.effect")?);
+                .remove(name.strip_prefix("bf.effect.")?);
             Some(())
         }
         _ => None,
