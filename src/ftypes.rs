@@ -35,8 +35,8 @@ impl Dir {
     }
 
     // Remove entry and return if removed
-    pub fn remove(&mut self, ino: Ino) {
-        self.children.retain(|(i, _n)| *i != ino);
+    pub fn remove(&mut self, name: &(impl PartialEq<str> + ?Sized)) {
+        self.children.retain(|(_, fname)| name != fname.as_str());
     }
 }
 
@@ -95,6 +95,7 @@ impl File {
 pub enum NodeItem {
     File(File),
     Dir(Dir),
+    Symlink(std::path::PathBuf),
 }
 
 pub struct Node {

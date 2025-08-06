@@ -1,5 +1,6 @@
-use std::{alloc::System, time::SystemTime};
+use std::{alloc::System, borrow::Cow, time::SystemTime};
 
+use fuser::FileAttr;
 use libc::ENOENT;
 
 use crate::ftypes::{ErrNo, Ino, Node, NodeItem};
@@ -85,23 +86,93 @@ impl Tree {
         }
     }
 
-    // Erase node
-    pub fn erase(&mut self, ino: Ino) -> Option<Node> {
-        let node = self.nodes[ino].take()?;
-        self.freelist.push(ino);
+    // Create hard link
+    pub fn link(&mut self, ino: Ino, parent: Ino, name: String) -> Result<FileAttr, ErrNo> {
+        if !self.nodes[ino].is_some() {
+            return Err(ENOENT);
+        }
 
-        // Erase from parent
-        let parent = self.nodes[node.parent].as_mut().unwrap();
+        let parent = self
+            .nodes
+            .get_mut(parent)
+            .ok_or(ENOENT)?
+            .as_mut()
+            .ok_or(ENOENT)?;
+        if let NodeItem::Dir(ref mut dir) = parent.item {
+            if dir.lookup(&name).is_none() {
+                parent.attr.mtime = SystemTime::now();
+                parent.attr.ctime = SystemTime::now();
+                parent.attr.blocks = 1;
+                parent.attr.size += 1;
+                dir.add(ino, name);
+            } else {
+                return Err(libc::EEXIST);
+            }
+        } else {
+            return Err(libc::ENOENT);
+        }
+
+        let node = self
+            .nodes
+            .get_mut(ino)
+            .ok_or(ENOENT)?
+            .as_mut()
+            .ok_or(ENOENT)?;
+        node.attr.nlink += 1;
+        Ok(node.attr)
+    }
+
+    pub fn rename(
+        &mut self,
+        old_parent_ino: Ino,
+        old_name: &str,
+        parent_ino: Ino,
+        name: &str,
+    ) -> Option<Ino> {
+        let old_parent = self.nodes[old_parent_ino].as_mut().unwrap();
+        let ino = match old_parent.item {
+            NodeItem::Dir(ref mut dir) => {
+                old_parent.attr.mtime = SystemTime::now();
+                old_parent.attr.ctime = SystemTime::now();
+                old_parent.attr.size -= 1;
+                dir.lookup(old_name).inspect(|_| dir.remove(old_name))
+            }
+            _ => panic!(""),
+        };
+        let parent = self.nodes[parent_ino].as_mut().unwrap();
         match parent.item {
             NodeItem::Dir(ref mut dir) => {
                 parent.attr.mtime = SystemTime::now();
                 parent.attr.ctime = SystemTime::now();
+                parent.attr.blocks = 1;
+                parent.attr.size += 1;
+                dir.add(ino.unwrap(), name.to_owned());
+            }
+            _ => panic!(""),
+        };
+        ino
+    }
+
+    // Erase node
+    pub fn unlink(&mut self, parent: Ino, name: &str) -> Option<()> {
+        // Erase from parent
+        let parent = self.nodes[parent].as_mut().unwrap();
+        let ino = match parent.item {
+            NodeItem::Dir(ref mut dir) => {
+                parent.attr.mtime = SystemTime::now();
+                parent.attr.ctime = SystemTime::now();
                 parent.attr.size -= 1;
-                dir.remove(ino);
+                dir.lookup(name).inspect(|_| dir.remove(name))?
             }
             _ => panic!("Corrupted tree: non-directory parent"),
         };
 
-        Some(node)
+        let node = self.nodes[ino].as_mut().unwrap();
+        node.attr.nlink -= 1;
+        if node.attr.nlink == 0 {
+            self.nodes[ino].take();
+        }
+
+        Some(())
     }
 }

@@ -9,6 +9,7 @@ use crate::ftypes::Ino;
 
 pub trait Storage {
     fn len(&self) -> usize;
+    fn truncate(&mut self, size: usize);
     fn read(&self, offset: usize, size: usize) -> Cow<'_, [u8]>;
     fn write(&mut self, offset: usize, data: &[u8]);
 }
@@ -36,6 +37,10 @@ impl RamStorage {
 impl Storage for RamStorage {
     fn len(&self) -> usize {
         self.buffer.len()
+    }
+
+    fn truncate(&mut self, size: usize) {
+        self.buffer.resize(size, 0);
     }
 
     fn read(&self, offset: usize, size: usize) -> Cow<'_, [u8]> {
@@ -107,6 +112,10 @@ impl Drop for FileStorage {
 impl Storage for FileStorage {
     fn len(&self) -> usize {
         self.file.metadata().map(|m| m.len() as usize).unwrap_or(0)
+    }
+
+    fn truncate(&mut self, size: usize) {
+        todo!()
     }
 
     fn read(&self, offset: usize, size: usize) -> Cow<'_, [u8]> {

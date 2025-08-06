@@ -1,10 +1,11 @@
 use clap::Parser;
 use fuser::{
     FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
-    Request,
+    Request, TimeOrNow,
 };
 use libc::ENOENT;
 use std::ffi::OsStr;
+use std::os::unix::ffi::OsStrExt;
 use std::time::{Duration, SystemTime};
 
 mod effect;
@@ -25,6 +26,16 @@ struct TestFS {
     sfactory: Box<dyn storage::Factory>,
 }
 
+enum NodeCreateT<'a> {
+    Dir,
+    File,
+    Symlink(&'a std::path::Path),
+}
+struct NodeCreateReq<'a> {
+    ntype: NodeCreateT<'a>,
+    req: &'a Request<'a>,
+}
+
 // Create fresh attributes
 fn fresh_attr(ino: Ino, kind: FileType, flags: u32, mode: u32, uid: u32, gid: u32) -> FileAttr {
     let now = SystemTime::now();
@@ -38,7 +49,7 @@ fn fresh_attr(ino: Ino, kind: FileType, flags: u32, mode: u32, uid: u32, gid: u3
         crtime: now,
         kind,
         perm: mode as u16,
-        nlink: 0,
+        nlink: 1,
         uid: uid,
         gid: gid,
         rdev: 0,
@@ -84,24 +95,26 @@ impl TestFS {
 
     fn create_node(
         &mut self,
-        req: &Request,
+        NodeCreateReq { req, ntype }: NodeCreateReq,
         parent: Ino,
         name: &OsStr,
         mode: u32,
-        kind: FileType,
         flags: u32,
     ) -> Result<FileAttr, ErrNo> {
         let (ino, nref) = self
             .tree
             .create(parent, name.to_string_lossy().to_string())?;
-        let item = match kind {
-            FileType::Directory => NodeItem::Dir(Dir::default()),
-            FileType::RegularFile => {
+
+        let (kind, item) = match ntype {
+            NodeCreateT::Dir => (FileType::Directory, NodeItem::Dir(Dir::default())),
+            NodeCreateT::File => {
                 let storage = self.sfactory.create(ino);
-                NodeItem::File(File::create(storage))
+                (FileType::RegularFile, NodeItem::File(File::create(storage)))
             }
+            NodeCreateT::Symlink(path) => (FileType::Symlink, NodeItem::Symlink(path.to_owned())),
             _ => panic!("!"),
         };
+
         let attr = fresh_attr(ino, kind, flags, mode, req.uid(), req.gid());
         let node = Node {
             parent,
@@ -113,9 +126,10 @@ impl TestFS {
         Ok(attr)
     }
 
-    fn erase_node(&mut self, parent: Ino, name: &OsStr) -> Result<Node, ErrNo> {
-        let ino = self.access_dir(parent)?.0.lookup(name).ok_or(ENOENT)?;
-        self.tree.erase(ino).ok_or(ENOENT)
+    fn unlink(&mut self, parent: Ino, name: &OsStr) -> Result<(), ErrNo> {
+        self.tree
+            .unlink(parent, &name.to_string_lossy())
+            .ok_or(ENOENT)
     }
 }
 
@@ -145,9 +159,9 @@ impl Filesystem for TestFS {
         mode: Option<u32>,
         _uid: Option<u32>,
         _gid: Option<u32>,
-        _size: Option<u64>,
-        _atime: Option<fuser::TimeOrNow>,
-        _mtime: Option<fuser::TimeOrNow>,
+        size: Option<u64>,
+        atime: Option<fuser::TimeOrNow>,
+        mtime: Option<fuser::TimeOrNow>,
         _ctime: Option<SystemTime>,
         _fh: Option<u64>,
         _crtime: Option<SystemTime>,
@@ -163,6 +177,30 @@ impl Filesystem for TestFS {
 
         if let Some(mode) = mode {
             node.attr.perm = mode as u16;
+        }
+
+        if let Some(size) = size {
+            match node.item {
+                NodeItem::File(ref mut f) => {
+                    f.storage_mut().truncate(size as usize);
+                    node.attr.size = size;
+                    node.attr.blocks = size / node.attr.blksize as u64;
+                }, 
+                _ => panic!("")
+            }
+        }
+
+        let tontot = |ton: TimeOrNow| match ton {
+            TimeOrNow::Now => SystemTime::now(),
+            TimeOrNow::SpecificTime(time) => time
+        };
+
+        if let Some(atime) = atime {
+            node.attr.atime = tontot(atime);
+        }
+
+        if let Some(mtime) = mtime {
+            node.attr.mtime = tontot(mtime);
         }
 
         reply.attr(&TTL, &node.attr);
@@ -213,11 +251,12 @@ impl Filesystem for TestFS {
         _umask: u32,
         reply: ReplyEntry,
     ) {
-        match self.create_node(req, parent as Ino, name, mode, FileType::Directory, 0) {
-            Ok(attr) => {
-                println!("Replying {:?}", attr);
-                reply.entry(&TTL, &attr, 0)
-            }
+        let req = NodeCreateReq {
+            req,
+            ntype: NodeCreateT::Dir,
+        };
+        match self.create_node(req, parent as Ino, name, mode, 0) {
+            Ok(attr) => reply.entry(&TTL, &attr, 0),
             Err(errno) => reply.error(errno),
         }
     }
@@ -233,11 +272,13 @@ impl Filesystem for TestFS {
         reply: fuser::ReplyCreate,
     ) {
         match self.create_node(
-            req,
+            NodeCreateReq {
+                ntype: NodeCreateT::File,
+                req,
+            },
             parent as Ino,
             name,
             mode,
-            FileType::RegularFile,
             flags as u32,
         ) {
             Ok(attr) => reply.created(&TTL, &attr, 0, attr.ino, 0),
@@ -342,23 +383,18 @@ impl Filesystem for TestFS {
         _flags: u32,
         reply: fuser::ReplyEmpty,
     ) {
-        let mut node = match self.erase_node(parent as Ino, name) {
-            Ok(node) => node,
-            Err(errno) => return reply.error(errno),
+        let ino = match self.tree.rename(
+            parent as Ino,
+            name.to_string_lossy().as_ref(),
+            newparent as Ino,
+            newname.to_string_lossy().as_ref(),
+        ) {
+            Some(ino) => ino,
+            None => return reply.error(ENOENT),
         };
-        let (ino, nref) = match self
-            .tree
-            .create(newparent as Ino, newname.to_string_lossy().to_string())
-        {
-            Ok(t) => t,
-            Err(errno) => return reply.error(errno),
-        };
-
-        assert!(node.attr.ino == ino as u64);
+        let node = self.access_node_mut(ino).unwrap();
         node.parent = newparent as Ino;
         node.attr.ctime = SystemTime::now();
-
-        nref.replace(node);
         reply.ok();
     }
 
@@ -374,14 +410,14 @@ impl Filesystem for TestFS {
     }
 
     fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
-        match self.erase_node(parent as Ino, name) {
+        match self.unlink(parent as Ino, name) {
             Ok(_) => reply.ok(),
             Err(errno) => reply.error(errno),
         }
     }
 
     fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: fuser::ReplyEmpty) {
-        match self.erase_node(parent as Ino, name) {
+        match self.unlink(parent as Ino, name) {
             Ok(_) => reply.ok(),
             Err(errno) => reply.error(errno),
         }
@@ -461,6 +497,54 @@ impl Filesystem for TestFS {
             255,
             0,
         );
+    }
+
+    fn symlink(
+        &mut self,
+        req: &Request<'_>,
+        parent: u64,
+        link_name: &OsStr,
+        target: &std::path::Path,
+        reply: ReplyEntry,
+    ) {
+        let req = NodeCreateReq {
+            ntype: NodeCreateT::Symlink(target),
+            req,
+        };
+        match self.create_node(req, parent as Ino, link_name, 0x777, 0) {
+            Ok(ref attr) => reply.entry(&TTL, attr, 0),
+            Err(errno) => reply.error(errno),
+        }
+    }
+
+    fn readlink(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyData) {
+        let node = match self.access_node(ino as Ino) {
+            Ok(node) => node,
+            Err(errno) => return reply.error(errno),
+        };
+        if let NodeItem::Symlink(ref path) = node.item {
+            reply.data(&path.as_os_str().as_bytes());
+        } else {
+            reply.error(ENOENT);
+        }
+    }
+
+    fn link(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        newparent: u64,
+        newname: &OsStr,
+        reply: ReplyEntry,
+    ) {
+        match self.tree.link(
+            ino as Ino,
+            newparent as Ino,
+            newname.to_string_lossy().to_string(),
+        ) {
+            Ok(ref attr) => reply.entry(&TTL, attr, 0),
+            Err(errno) => reply.error(errno),
+        }
     }
 }
 
