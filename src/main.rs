@@ -310,7 +310,7 @@ impl Filesystem for TestFS {
         };
 
         let written = if let NodeItem::File(ref mut file) = node.item {
-            file.storage_mut().write(offset as usize, data);
+            let len = file.storage_mut().write(offset as usize, data);
             node.attr.size = file.storage().len() as u64;
             node.attr.blocks = (node.attr.size / (node.attr.blksize as u64)) + 1;
 

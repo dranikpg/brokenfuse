@@ -40,7 +40,10 @@ impl Storage for RamStorage {
     }
 
     fn truncate(&mut self, size: usize) {
-        self.buffer.resize(size, 0);
+        // No need to extend ahead
+        if size <= self.buffer.len() {
+            self.buffer.resize(size, 0);
+        }
     }
 
     fn read(&self, offset: usize, size: usize) -> Cow<'_, [u8]> {
