@@ -1,6 +1,7 @@
 use fuser::FileAttr;
 use serde::Serialize;
 use std::cell::Cell;
+use std::time::SystemTime;
 
 use crate::effect::EffectGroup;
 use crate::storage::Storage;
@@ -103,4 +104,23 @@ pub struct Node {
     pub attr: FileAttr,
     pub item: NodeItem,
     pub effects: EffectGroup,
+}
+
+pub trait AttrOps {
+    fn change_dir_balance(&mut self, balance: i8);
+    fn change_nlink_balance(&mut self, balance: i8);
+}
+
+impl AttrOps for FileAttr {
+    fn change_dir_balance(&mut self, balance: i8) {
+        self.mtime = SystemTime::now();
+        self.ctime = self.mtime;
+        self.size = self.size.wrapping_add_signed(balance as i64);
+        self.blocks = self.size / self.blksize as u64;
+    }
+
+    fn change_nlink_balance(&mut self, balance: i8) {
+        self.ctime = SystemTime::now();
+        self.nlink = self.nlink.wrapping_add_signed(balance as i32);
+    }
 }

@@ -14,10 +14,9 @@ mod ftypes;
 mod storage;
 mod xaops;
 
+use effect::{EffectGroup, OpType};
 use ftree::Tree;
 use ftypes::{Dir, ErrNo, File, Ino, Node, NodeItem};
-
-use crate::effect::{EffectGroup, OpType};
 
 const TTL: Duration = Duration::from_secs(1);
 
@@ -127,9 +126,7 @@ impl TestFS {
     }
 
     fn unlink(&mut self, parent: Ino, name: &OsStr) -> Result<(), ErrNo> {
-        self.tree
-            .unlink(parent, &name.to_string_lossy())
-            .ok_or(ENOENT)
+        self.tree.unlink(parent, &name.to_string_lossy())
     }
 }
 
@@ -185,14 +182,14 @@ impl Filesystem for TestFS {
                     f.storage_mut().truncate(size as usize);
                     node.attr.size = size;
                     node.attr.blocks = size / node.attr.blksize as u64;
-                }, 
-                _ => panic!("")
+                }
+                _ => panic!(""),
             }
         }
 
         let tontot = |ton: TimeOrNow| match ton {
             TimeOrNow::Now => SystemTime::now(),
-            TimeOrNow::SpecificTime(time) => time
+            TimeOrNow::SpecificTime(time) => time,
         };
 
         if let Some(atime) = atime {
@@ -383,19 +380,15 @@ impl Filesystem for TestFS {
         _flags: u32,
         reply: fuser::ReplyEmpty,
     ) {
-        let ino = match self.tree.rename(
+        match self.tree.rename(
             parent as Ino,
             name.to_string_lossy().as_ref(),
             newparent as Ino,
             newname.to_string_lossy().as_ref(),
         ) {
-            Some(ino) => ino,
-            None => return reply.error(ENOENT),
-        };
-        let node = self.access_node_mut(ino).unwrap();
-        node.parent = newparent as Ino;
-        node.attr.ctime = SystemTime::now();
-        reply.ok();
+            Ok(_) => reply.ok(),
+            Err(errno) => reply.error(errno),
+        }
     }
 
     fn flush(
@@ -588,7 +581,7 @@ fn main() {
             effects: EffectGroup::default(),
         },
     ];
-    let tree = Tree::initial(nodes);
+    let tree = Tree::new(nodes);
     let sfactory = if let Some(path) = args.passthrough {
         Box::new(storage::FileSFactory::new(&path)) as Box<dyn storage::Factory>
     } else {

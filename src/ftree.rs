@@ -1,9 +1,9 @@
-use std::{alloc::System, borrow::Cow, time::SystemTime};
+use std::time::SystemTime;
 
 use fuser::FileAttr;
 use libc::ENOENT;
 
-use crate::ftypes::{ErrNo, Ino, Node, NodeItem};
+use crate::ftypes::{AttrOps, Dir, ErrNo, Ino, Node, NodeItem};
 
 pub struct Tree {
     nodes: Vec<Option<Node>>,
@@ -11,13 +11,14 @@ pub struct Tree {
 }
 
 impl Tree {
-    pub fn initial<const N: usize>(nodes: [Node; N]) -> Tree {
+    pub fn new<const N: usize>(nodes: [Node; N]) -> Tree {
         Tree {
             nodes: nodes.into_iter().map(|n| Some(n)).collect(),
             freelist: vec![],
         }
     }
 
+    // Count number of occupied nodes
     pub fn count(&self) -> usize {
         self.nodes.iter().filter(|n| n.is_some()).count()
     }
@@ -30,6 +31,15 @@ impl Tree {
         self.nodes.get_mut(ino).map(&Option::as_mut).flatten()
     }
 
+    fn get_dir_mut(&mut self, ino: Ino) -> Option<(&mut Dir, &mut FileAttr)> {
+        let node = self.get_mut(ino)?;
+        match node.item {
+            NodeItem::Dir(ref mut dir) => Some((dir, &mut node.attr)),
+            _ => None,
+        }
+    }
+
+    // Climb up from `ino` up to root yielding every node on the path
     pub fn climb(&self, ino: Ino) -> impl Iterator<Item = &Node> {
         struct It<'a> {
             ino: Option<Ino>,
@@ -37,15 +47,11 @@ impl Tree {
         }
         impl<'a> Iterator for It<'a> {
             type Item = &'a Node;
-
             fn next(&mut self) -> Option<Self::Item> {
                 let ino = self.ino?;
                 let node = self.tree.nodes[ino].as_ref()?;
-                if node.parent != ino {
-                    self.ino = Some(node.parent);
-                } else {
-                    self.ino = None;
-                }
+                // End node points to itself
+                self.ino = Some(node.parent).take_if(|new_ino| *new_ino == ino);
                 Some(node)
             }
         }
@@ -55,124 +61,79 @@ impl Tree {
         }
     }
 
-    // Create entry for node and return reference to it
-    pub fn create(&mut self, parent: Ino, name: String) -> Result<(Ino, &mut Option<Node>), ErrNo> {
-        // Assure freelist has at least one index
-        if self.freelist.is_empty() {
-            self.freelist.push(self.nodes.len());
-            self.nodes.push(None);
-        }
-
-        let parent = self
-            .nodes
-            .get_mut(parent)
-            .ok_or(ENOENT)?
-            .as_mut()
-            .ok_or(ENOENT)?;
-        if let NodeItem::Dir(ref mut dir) = parent.item {
-            if dir.lookup(&name).is_none() {
-                let ino = self.freelist.pop().unwrap();
-                dir.add(ino, name);
-                parent.attr.mtime = SystemTime::now();
-                parent.attr.ctime = SystemTime::now();
-                parent.attr.blocks = 1;
-                parent.attr.size += 1;
-                Ok((ino, &mut self.nodes[ino]))
-            } else {
-                Err(libc::EEXIST)
-            }
+    // Add node to `parent` under `name` pointing to `ino`
+    fn add_entry(&mut self, ino: Ino, parent: Ino, name: String) -> Result<(), ErrNo> {
+        let (pdir, pattr) = self.get_dir_mut(parent).ok_or(ENOENT)?;
+        if pdir.lookup(&name).is_none() {
+            pdir.add(ino, name);
+            pattr.change_dir_balance(1);
+            Ok(())
         } else {
-            Err(libc::ENOENT)
+            return Err(libc::EEXIST);
         }
+    }
+
+    // Remove entry from `parent` under `name` and return inode it was pointing to
+    fn remove_entry(&mut self, parent: Ino, name: &str) -> Result<Ino, ErrNo> {
+        let (pdir, pattr) = self.get_dir_mut(parent).ok_or(ENOENT)?;
+        if let Some(ino) = pdir.lookup(name) {
+            pdir.remove(name);
+            pattr.change_dir_balance(-1);
+            Ok(ino)
+        } else {
+            Err(ENOENT)
+        }
+    }
+
+    // Create new entry at `parent`/`name` and return ino + reference to node slot
+    pub fn create(&mut self, parent: Ino, name: String) -> Result<(Ino, &mut Option<Node>), ErrNo> {
+        // Choose next ino ahead to avoid borrow (partial borrows where are youu...)
+        let ino = self.freelist.pop().unwrap_or_else(|| {
+            self.nodes.push(None);
+            self.nodes.len() - 1
+        });
+
+        self.add_entry(ino, parent, name)
+            .inspect_err(|_| self.freelist.push(ino))?;
+        Ok((ino, &mut self.nodes[ino]))
     }
 
     // Create hard link
     pub fn link(&mut self, ino: Ino, parent: Ino, name: String) -> Result<FileAttr, ErrNo> {
+        // Assert inode is valid
         if !self.nodes[ino].is_some() {
             return Err(ENOENT);
         }
 
-        let parent = self
-            .nodes
-            .get_mut(parent)
-            .ok_or(ENOENT)?
-            .as_mut()
-            .ok_or(ENOENT)?;
-        if let NodeItem::Dir(ref mut dir) = parent.item {
-            if dir.lookup(&name).is_none() {
-                parent.attr.mtime = SystemTime::now();
-                parent.attr.ctime = SystemTime::now();
-                parent.attr.blocks = 1;
-                parent.attr.size += 1;
-                dir.add(ino, name);
-            } else {
-                return Err(libc::EEXIST);
-            }
-        } else {
-            return Err(libc::ENOENT);
-        }
+        self.add_entry(ino, parent, name)?;
 
-        let node = self
-            .nodes
-            .get_mut(ino)
-            .ok_or(ENOENT)?
-            .as_mut()
-            .ok_or(ENOENT)?;
-        node.attr.nlink += 1;
-        Ok(node.attr)
+        let attr = &mut self.get_mut(ino).unwrap().attr;
+        attr.change_nlink_balance(1);
+        Ok(*attr)
     }
 
     pub fn rename(
         &mut self,
-        old_parent_ino: Ino,
+        old_parent: Ino,
         old_name: &str,
-        parent_ino: Ino,
+        parent: Ino,
         name: &str,
-    ) -> Option<Ino> {
-        let old_parent = self.nodes[old_parent_ino].as_mut().unwrap();
-        let ino = match old_parent.item {
-            NodeItem::Dir(ref mut dir) => {
-                old_parent.attr.mtime = SystemTime::now();
-                old_parent.attr.ctime = SystemTime::now();
-                old_parent.attr.size -= 1;
-                dir.lookup(old_name).inspect(|_| dir.remove(old_name))
-            }
-            _ => panic!(""),
-        };
-        let parent = self.nodes[parent_ino].as_mut().unwrap();
-        match parent.item {
-            NodeItem::Dir(ref mut dir) => {
-                parent.attr.mtime = SystemTime::now();
-                parent.attr.ctime = SystemTime::now();
-                parent.attr.blocks = 1;
-                parent.attr.size += 1;
-                dir.add(ino.unwrap(), name.to_owned());
-            }
-            _ => panic!(""),
-        };
-        ino
+    ) -> Result<(), ErrNo> {
+        let ino = self.remove_entry(old_parent, old_name)?;
+        self.add_entry(ino, parent, name.to_owned())
+            .inspect_err(|_| {
+                // Restore previous state on insertion error
+                self.add_entry(ino, old_parent, old_name.to_owned())
+                    .unwrap()
+            })
     }
 
-    // Erase node
-    pub fn unlink(&mut self, parent: Ino, name: &str) -> Option<()> {
-        // Erase from parent
-        let parent = self.nodes[parent].as_mut().unwrap();
-        let ino = match parent.item {
-            NodeItem::Dir(ref mut dir) => {
-                parent.attr.mtime = SystemTime::now();
-                parent.attr.ctime = SystemTime::now();
-                parent.attr.size -= 1;
-                dir.lookup(name).inspect(|_| dir.remove(name))?
-            }
-            _ => panic!("Corrupted tree: non-directory parent"),
-        };
+    pub fn unlink(&mut self, parent: Ino, name: &str) -> Result<(), ErrNo> {
+        let ino = self.remove_entry(parent, name)?;
 
-        let node = self.nodes[ino].as_mut().unwrap();
-        node.attr.nlink -= 1;
-        if node.attr.nlink == 0 {
-            self.nodes[ino].take();
-        }
-
-        Some(())
+        let attr = &mut self.get_mut(ino).unwrap().attr;
+        attr.change_nlink_balance(-1);
+        self.nodes[ino].take_if(|n| n.attr.nlink == 0);
+        Ok(())
     }
 }
