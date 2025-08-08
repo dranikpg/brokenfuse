@@ -1,15 +1,15 @@
-use std::time::SystemTime;
-
 use fuser::FileAttr;
 use libc::ENOENT;
 
-use crate::ftypes::{AttrOps, Dir, ErrNo, Ino, Node, NodeItem};
+use crate::ftypes::{Dir, ErrNo, Ino, Node, NodeItem};
+use crate::util::AttrOps;
 
 pub struct Tree {
     nodes: Vec<Option<Node>>,
     freelist: Vec<Ino>,
 }
 
+// A tree manages a set of nodes, their directory structure and lifetimes
 impl Tree {
     pub fn new<const N: usize>(nodes: [Node; N]) -> Tree {
         Tree {
@@ -66,7 +66,7 @@ impl Tree {
         let (pdir, pattr) = self.get_dir_mut(parent).ok_or(ENOENT)?;
         if pdir.lookup(&name).is_none() {
             pdir.add(ino, name);
-            pattr.change_dir_balance(1);
+            pattr.dir_balance(1);
             Ok(())
         } else {
             return Err(libc::EEXIST);
@@ -76,13 +76,9 @@ impl Tree {
     // Remove entry from `parent` under `name` and return inode it was pointing to
     fn remove_entry(&mut self, parent: Ino, name: &str) -> Result<Ino, ErrNo> {
         let (pdir, pattr) = self.get_dir_mut(parent).ok_or(ENOENT)?;
-        if let Some(ino) = pdir.lookup(name) {
-            pdir.remove(name);
-            pattr.change_dir_balance(-1);
-            Ok(ino)
-        } else {
-            Err(ENOENT)
-        }
+        pdir.remove(name)
+            .inspect(|_| pattr.dir_balance(-1))
+            .ok_or(ENOENT)
     }
 
     // Create new entry at `parent`/`name` and return ino + reference to node slot
@@ -108,7 +104,7 @@ impl Tree {
         self.add_entry(ino, parent, name)?;
 
         let attr = &mut self.get_mut(ino).unwrap().attr;
-        attr.change_nlink_balance(1);
+        attr.nlink_balance(1);
         Ok(*attr)
     }
 
@@ -132,7 +128,7 @@ impl Tree {
         let ino = self.remove_entry(parent, name)?;
 
         let attr = &mut self.get_mut(ino).unwrap().attr;
-        attr.change_nlink_balance(-1);
+        attr.nlink_balance(-1);
         self.nodes[ino].take_if(|n| n.attr.nlink == 0);
         Ok(())
     }

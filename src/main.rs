@@ -12,11 +12,13 @@ mod effect;
 mod ftree;
 mod ftypes;
 mod storage;
+mod util;
 mod xaops;
 
 use effect::{EffectGroup, OpType};
 use ftree::Tree;
 use ftypes::{Dir, ErrNo, File, Ino, Node, NodeItem};
+use util::ImmutCounter;
 
 const TTL: Duration = Duration::from_secs(1);
 
@@ -76,7 +78,6 @@ impl TestFS {
             .get_mut(ino)
             .map(|n| {
                 n.attr.atime = SystemTime::now();
-                n.attr.mtime = SystemTime::now();
                 n
             })
             .ok_or(ENOENT)
@@ -111,7 +112,6 @@ impl TestFS {
                 (FileType::RegularFile, NodeItem::File(File::create(storage)))
             }
             NodeCreateT::Symlink(path) => (FileType::Symlink, NodeItem::Symlink(path.to_owned())),
-            _ => panic!("!"),
         };
 
         let attr = fresh_attr(ino, kind, flags, mode, req.uid(), req.gid());
@@ -312,7 +312,7 @@ impl Filesystem for TestFS {
             node.attr.blocks = (node.attr.size / (node.attr.blksize as u64)) + 1;
 
             file.stats.writes.incr();
-            file.stats.write_volume.record(data.len());
+            file.stats.write_volume.add(data.len());
             Some(data.len())
         } else {
             None
@@ -355,7 +355,7 @@ impl Filesystem for TestFS {
                 .read(offset as usize, size as usize)
                 .into_owned();
             file.stats.reads.incr();
-            file.stats.read_volume.record(data.len());
+            file.stats.read_volume.add(data.len());
             Some(data)
         } else {
             None
@@ -468,11 +468,11 @@ impl Filesystem for TestFS {
     fn fallocate(
         &mut self,
         _req: &Request<'_>,
-        ino: u64,
-        fh: u64,
-        offset: i64,
-        length: i64,
-        mode: i32,
+        _ino: u64,
+        _fh: u64,
+        _offset: i64,
+        _length: i64,
+        _mode: i32,
         reply: fuser::ReplyEmpty,
     ) {
         reply.ok();

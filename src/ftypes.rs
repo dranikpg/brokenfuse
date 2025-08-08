@@ -1,13 +1,14 @@
 use fuser::FileAttr;
 use serde::Serialize;
 use std::cell::Cell;
-use std::time::SystemTime;
 
 use crate::effect::EffectGroup;
 use crate::storage::Storage;
+
 pub type Ino = usize;
 pub type ErrNo = libc::c_int;
 
+// Dir manages a list of children. It does NOT manage the nodes lifetimes
 #[derive(Default)]
 pub struct Dir {
     children: Vec<(Ino, String)>,
@@ -35,40 +36,21 @@ impl Dir {
         self.children.push((ino, name))
     }
 
-    // Remove entry and return if removed
-    pub fn remove(&mut self, name: &(impl PartialEq<str> + ?Sized)) {
+    // Remove entry and return removed inode
+    pub fn remove(&mut self, name: &(impl PartialEq<str> + ?Sized)) -> Option<Ino> {
+        let ino = self.lookup(name)?;
         self.children.retain(|(_, fname)| name != fname.as_str());
-    }
-}
-
-#[derive(Default)]
-pub struct ImmutCounter(Cell<usize>);
-
-impl ImmutCounter {
-    pub fn record(&self, u: impl TryInto<usize>) {
-        self.0.update(|v| v + (u.try_into().unwrap_or(0)));
-    }
-    pub fn incr(&self) {
-        self.record(1usize);
-    }
-}
-
-impl Serialize for ImmutCounter {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_u64(self.0.get() as u64)
+        Some(ino)
     }
 }
 
 #[derive(Default, Serialize)]
 pub struct FileStats {
-    pub reads: ImmutCounter,
-    pub read_volume: ImmutCounter,
-    pub writes: ImmutCounter,
-    pub write_volume: ImmutCounter,
-    pub errors: ImmutCounter,
+    pub reads: Cell<usize>,
+    pub read_volume: Cell<usize>,
+    pub writes: Cell<usize>,
+    pub write_volume: Cell<usize>,
+    pub errors: Cell<usize>,
 }
 
 pub struct File {
@@ -104,23 +86,4 @@ pub struct Node {
     pub attr: FileAttr,
     pub item: NodeItem,
     pub effects: EffectGroup,
-}
-
-pub trait AttrOps {
-    fn change_dir_balance(&mut self, balance: i8);
-    fn change_nlink_balance(&mut self, balance: i8);
-}
-
-impl AttrOps for FileAttr {
-    fn change_dir_balance(&mut self, balance: i8) {
-        self.mtime = SystemTime::now();
-        self.ctime = self.mtime;
-        self.size = self.size.wrapping_add_signed(balance as i64);
-        self.blocks = self.size / self.blksize as u64;
-    }
-
-    fn change_nlink_balance(&mut self, balance: i8) {
-        self.ctime = SystemTime::now();
-        self.nlink = self.nlink.wrapping_add_signed(balance as i32);
-    }
 }

@@ -117,7 +117,7 @@ impl Storage for FileStorage {
         self.file.metadata().map(|m| m.len() as usize).unwrap_or(0)
     }
 
-    fn truncate(&mut self, size: usize) {
+    fn truncate(&mut self, _size: usize) {
         todo!()
     }
 
