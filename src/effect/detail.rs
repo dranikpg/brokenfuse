@@ -7,10 +7,9 @@ use crate::{
     ftypes::ErrNo,
 };
 
-// Delay processing by X ms. {"millis": 100}
+// Delay processing by X ms. {"duration_ms": 100}
 #[derive(Serialize, Deserialize)]
 pub struct Delay {
-    #[serde(rename = "millis")]
     duration_ms: u64,
 }
 
@@ -19,8 +18,8 @@ impl Effect for Delay {
         EffectResult::Delay(self.duration_ms)
     }
 
-    fn serialize(&self) -> serde_json::Value {
-        serde_json::to_value(&self).unwrap()
+    fn as_any(&self) -> &dyn std::any::Any {
+        return self;
     }
 }
 
@@ -29,13 +28,13 @@ impl Effect for Delay {
 enum FlakeyCondition {
     Always { always: bool },
     Prob { prob: f32 },
-    Interval { avail: f64, unavail: f64 },
+    Interval { avail: u64, unavail: u64 },
 }
 
 // Return `errno` (EIO by default) with:
 // 1. Always or never {"always": true/false }
 // 2. `prob`% probability {"prob": 0.3, "errno": 5}
-// 3. `avail`/`unavail` intervals in seconds {"avail": 5, "unavail": 10}
+// 3. `avail`/`unavail` intervals in milliseconds {"avail": 5, "unavail": 10}
 #[derive(Serialize, Deserialize)]
 pub struct Flakey {
     #[serde(flatten)]
@@ -66,16 +65,15 @@ impl Effect for Flakey {
                 let passed_ms = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_millis()
-                    - 1754140900000; // smaller value is float friendly                
+                    .as_millis();             
 
-                let rem = (passed_ms as f64 / 1000f64) % (avail + unavail);
-                ret(rem <= avail)
+                let rem = (passed_ms) % ((avail + unavail) as u128);
+                ret(rem <= avail as u128)
             }
         }
     }
 
-    fn serialize(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap()
+    fn as_any(&self) -> &dyn std::any::Any {
+        return self;
     }
 }

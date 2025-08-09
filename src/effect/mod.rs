@@ -1,5 +1,8 @@
 use bitflags::bitflags;
+use libc::EINVAL;
+use serde::{Serialize, Serializer};
 use serde_json::Value as JValue;
+use std::any::Any;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -15,7 +18,7 @@ pub enum EffectResult {
 
 pub trait Effect {
     fn apply(&self) -> EffectResult;
-    fn serialize(&self) -> serde_json::Value;
+    fn as_any(&self) -> &dyn Any;
 }
 
 bitflags! {
@@ -29,13 +32,13 @@ bitflags! {
 }
 
 impl FromStr for OpType {
-    type Err = ();
+    type Err = ErrNo;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut res = OpType::empty();
         for c in s.chars() {
             let s: String = c.into();
-            res |= OpType::from_name(&s.to_ascii_uppercase()).ok_or(())?;
+            res |= OpType::from_name(&s.to_ascii_uppercase()).ok_or(EINVAL)?;
         }
         Ok(res)
     }
@@ -48,35 +51,50 @@ impl std::fmt::Display for OpType {
     }
 }
 
+impl Serialize for OpType {
+    fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer {
+        s.serialize_str(&format!("{}", self))
+    }
+}
+
+#[derive(Serialize)]
 pub struct DefinedEffect {
-    pub name: &'static str,
+    pub name: String,
+    #[serde(flatten, serialize_with="serialize_box")]
     pub effect: Box<dyn Effect>,
     pub op: OpType,
 }
 
+fn serialize_box<S>(b: &Box<dyn Effect>, s: S) -> Result<S::Ok, S::Error> where S: Serializer {
+    let a = b.as_any();
+    if let Some(delay) = a.downcast_ref::<detail::Delay>() {
+        delay.serialize(s)
+    } else if let Some(flakey) = a.downcast_ref::<detail::Flakey>() {
+        flakey.serialize(s)
+    } else {
+        panic!("Unsupported dynamic type!");
+    }
+}
+
 impl DefinedEffect {
-    pub fn create(name: &str, data: &str) -> Result<Self, String> {
+    pub fn create(name: &str, data: &str) -> Result<Self, ErrNo> {
         let mut parsed: JValue = serde_json::from_str(data).unwrap();
-        let op: OpType = {
-            let op_str = parsed
-                .as_object_mut()
-                .unwrap()
-                .remove("op")
-                .unwrap()
-                .as_str()
-                .unwrap()
-                .to_owned();
-            op_str.parse().unwrap()
-        };
+        let op: OpType = parsed
+            .as_object_mut()
+            .and_then(|obj| obj.remove("op"))
+            .and_then(|obj| obj.as_str().map(|s| s.to_owned()))
+            .ok_or(EINVAL)?
+            .parse()?;
+
+        let (eftype, _) = name.split_once("-").unwrap_or((name, name));
 
         macro_rules! match_effect {
             ($($name:literal => $efft:ty),*) => {
-                match name {
-                    $($name => {
-                        let pt: $efft = serde_json::from_value(parsed).unwrap();
-                        ($name, Box::new(pt))
-                    },)*
-                    _ => return Err(format!("")),
+                match eftype {
+                    $($name => ($name, Box::new(serde_json::from_value::<$efft>(parsed).map_err(|_|EINVAL)?)),)*
+                    _ => return Err(EINVAL),
                 }
             };
         }
@@ -85,23 +103,14 @@ impl DefinedEffect {
             "delay" => detail::Delay, "flakey" => detail::Flakey
         };
         Ok(DefinedEffect {
-            name: sname,
+            name: sname.to_owned(),
             effect,
             op,
         })
     }
-
-    pub fn serialize(&self) -> JValue {
-        let mut map = match self.effect.serialize() {
-            JValue::Object(obj) => obj,
-            _ => panic!("bad serialization"),
-        };
-        map.insert("op".to_owned(), JValue::String(format!("{}", self.op)));
-        JValue::Object(map)
-    }
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize)]
 pub struct EffectGroup {
     effects: Vec<DefinedEffect>,
 }
@@ -124,19 +133,8 @@ impl EffectGroup {
     }
 
     pub fn add(&mut self, nde: DefinedEffect) {
-        self.remove(nde.name);
+        self.remove(&nde.name);
         self.effects.push(nde);
-    }
-
-    pub fn serialize(&self) -> JValue {
-        let mut list: Vec<JValue> = vec![];
-        for effect in self {
-            let mut map = serde_json::Map::<String, JValue>::new();
-            map.insert("name".to_owned(), JValue::String(effect.name.to_owned()));
-            map.insert("effect".to_owned(), effect.serialize());
-            list.push(JValue::Object(map));
-        }
-        JValue::Array(list)
     }
 }
 

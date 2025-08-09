@@ -447,8 +447,8 @@ impl Filesystem for TestFS {
             &name.to_string_lossy(),
             &String::from_utf8_lossy(value),
         ) {
-            Some(_) => reply.ok(),
-            None => reply.error(ENOENT),
+            Ok(_) => reply.ok(),
+            Err(errno) => reply.error(errno),
         }
     }
 
