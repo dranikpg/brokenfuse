@@ -1,9 +1,9 @@
 [build-system]
-requires = ["setuptools >= 77.0.3"]
+requires = ["setuptools >= 77.0.3", "setuptools-rust"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "broken_fuse"
+name = "brokenfuse"
 version = "0.0.1"
 authors = [
   { name="Vladislav Oleshko", email="vladislav.oleshko@gmail.com" },
@@ -19,3 +19,12 @@ license-files = ["LICEN[CS]E*"]
 
 [project.urls]
 Homepage = "https://github.com/dranikpg/brokenfuse"
+
+[tool.setuptools.package-dir]
+"brokenfuse"="pysrc"
+
+
+[[tool.setuptools-rust.bins]]
+target = "brokenfuse"
+path = "Cargo.toml"
+args = ["--release"]
