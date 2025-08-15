@@ -4,6 +4,7 @@ use fuser::{
     Request, TimeOrNow,
 };
 use libc::ENOENT;
+use rand::SeedableRng;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::time::{Duration, SystemTime};
@@ -15,7 +16,7 @@ mod storage;
 mod util;
 mod xaops;
 
-use effect::{EffectGroup, OpType};
+use effect::OpType;
 use ftree::Tree;
 use ftypes::{Dir, ErrNo, File, Ino, Node, NodeItem};
 use util::ImmutCounter;
@@ -25,6 +26,7 @@ const TTL: Duration = Duration::from_secs(1);
 struct TestFS {
     tree: ftree::Tree,
     sfactory: Box<dyn storage::Factory>,
+    rgen: rand::rngs::StdRng,
 }
 
 enum NodeCreateT<'a> {
@@ -119,7 +121,7 @@ impl TestFS {
             parent,
             attr,
             item,
-            effects: EffectGroup::default(),
+            effects: effect::Group::default(),
         };
         nref.replace(node);
         Ok(attr)
@@ -127,6 +129,17 @@ impl TestFS {
 
     fn unlink(&mut self, parent: Ino, name: &OsStr) -> Result<(), ErrNo> {
         self.tree.unlink(parent, &name.to_string_lossy())
+    }
+
+    fn run_effects(&mut self, op: effect::OpDesr, ino: Ino) -> (u64, Option<i32>) {
+        let ctx = effect::Context {
+            op: op,
+            origin: 0,
+            target: ino,
+            tree: &self.tree,
+            rgen: &mut self.rgen,
+        };
+        effect::run(self.tree.climb(ino as Ino), ctx)
     }
 }
 
@@ -295,7 +308,8 @@ impl Filesystem for TestFS {
         _lock_owner: Option<u64>,
         reply: fuser::ReplyWrite,
     ) {
-        let (ef_sleep, ef_err) = effect::run(&self.tree, ino as Ino, OpType::W);
+        let descr = effect::OpDesr::Write { offset: offset as usize, len: data.len() };
+        let (ef_sleep, ef_err) = self.run_effects(descr, ino as Ino);
         if let Some(errno) = ef_err {
             effect::reply(ef_sleep, move || reply.error(errno));
             return;
@@ -338,8 +352,9 @@ impl Filesystem for TestFS {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        let (ef_sleep, ef_err) = effect::run(&self.tree, ino as Ino, OpType::R);
-        if let Some(errno) = ef_err {
+        let descr = effect::OpDesr::Read{offset: offset as usize, len: size as usize};
+        let (ef_sleep, ef_errno) = self.run_effects(descr, ino as Ino);
+        if let Some(errno) = ef_errno {
             effect::reply(ef_sleep, move || reply.error(errno));
             return;
         }
@@ -552,6 +567,9 @@ struct Args {
     // Pass through file storage
     #[arg(short, long)]
     passthrough: Option<String>,
+
+    #[arg(long)]
+    seed: Option<u64>,
 }
 
 fn main() {
@@ -572,13 +590,13 @@ fn main() {
             parent: 0,
             item: NodeItem::Dir(Dir::default()),
             attr: fresh_attr(0, FileType::Directory, 0, 0x000, 1000, 1001),
-            effects: EffectGroup::default(),
+            effects: effect::Group::default(),
         },
         Node {
             parent: 1,
             item: NodeItem::Dir(Dir::default()),
             attr: fresh_attr(1, FileType::Directory, 0, 0o754, 1000, 1001),
-            effects: EffectGroup::default(),
+            effects: effect::Group::default(),
         },
     ];
     let tree = Tree::new(nodes);
@@ -587,5 +605,20 @@ fn main() {
     } else {
         Box::new(storage::RamSFactory)
     };
-    fuser::mount2(TestFS { tree, sfactory }, mountpoint, &options).unwrap();
+    let rgen = if let Some(seed) = args.seed {
+        rand::rngs::StdRng::seed_from_u64(seed)
+    } else {
+        rand::rngs::StdRng::from_os_rng()
+    };
+
+    fuser::mount2(
+        TestFS {
+            tree,
+            sfactory,
+            rgen,
+        },
+        mountpoint,
+        &options,
+    )
+    .unwrap();
 }

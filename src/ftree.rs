@@ -51,12 +51,36 @@ impl Tree {
                 let ino = self.ino?;
                 let node = self.tree.nodes[ino].as_ref()?;
                 // End node points to itself
-                self.ino = Some(node.parent).take_if(|new_ino| *new_ino == ino);
+                self.ino = Some(node.parent).take_if(|new_ino| *new_ino != ino);
                 Some(node)
             }
         }
         It {
             ino: Some(ino),
+            tree: &self,
+        }
+    }
+
+    pub fn traverse(&self, ino: Ino) -> impl Iterator<Item = &Node> {
+        struct It<'a> {
+            q: std::collections::VecDeque<Ino>,
+            tree: &'a Tree,
+        }
+        impl<'a> Iterator for It<'a> {
+            type Item = &'a Node;
+            fn next(&mut self) -> Option<Self::Item> {
+                let next = self.q.pop_front()?;
+                let node = self.tree.nodes[next].as_ref()?;
+                if let NodeItem::Dir(dir) = &node.item {
+                    for (child, _) in dir.list() {
+                        self.q.push_back(child);
+                    }
+                }
+                Some(node)
+            }
+        }
+        It {
+            q: std::collections::VecDeque::from([ino]),
             tree: &self,
         }
     }

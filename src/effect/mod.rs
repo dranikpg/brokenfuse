@@ -6,7 +6,7 @@ use std::any::Any;
 use std::str::FromStr;
 use std::time::Duration;
 
-use crate::ftree::Tree;
+use crate::ftree;
 use crate::ftypes::{ErrNo, Ino};
 mod detail;
 
@@ -16,8 +16,30 @@ pub enum EffectResult {
     Delay(u64),   // Sleep ms
 }
 
+pub enum OpDesr {
+    Read { offset: usize, len: usize },
+    Write { offset: usize, len: usize },
+}
+
+impl OpDesr {
+    fn optype(&self) -> OpType {
+        match self {
+            OpDesr::Read { .. } => OpType::R,
+            OpDesr::Write { .. } => OpType::W,
+        }
+    }
+}
+
+pub struct Context<'a> {
+    pub op: OpDesr,
+    pub origin: Ino, // where the effect is defined at
+    pub target: Ino, // where the effect is applied at
+    pub tree: &'a ftree::Tree,
+    pub rgen: &'a mut rand::rngs::StdRng,
+}
+
 pub trait Effect {
-    fn apply(&self) -> EffectResult;
+    fn apply(&self, ctx: &mut Context) -> EffectResult;
     fn as_any(&self) -> &dyn Any;
 }
 
@@ -54,7 +76,8 @@ impl std::fmt::Display for OpType {
 impl Serialize for OpType {
     fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
     where
-        S: Serializer {
+        S: Serializer,
+    {
         s.serialize_str(&format!("{}", self))
     }
 }
@@ -62,17 +85,22 @@ impl Serialize for OpType {
 #[derive(Serialize)]
 pub struct DefinedEffect {
     pub name: String,
-    #[serde(flatten, serialize_with="serialize_box")]
+    #[serde(flatten, serialize_with = "serialize_box")]
     pub effect: Box<dyn Effect>,
     pub op: OpType,
 }
 
-fn serialize_box<S>(b: &Box<dyn Effect>, s: S) -> Result<S::Ok, S::Error> where S: Serializer {
+fn serialize_box<S>(b: &Box<dyn Effect>, s: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
     let a = b.as_any();
     if let Some(delay) = a.downcast_ref::<detail::Delay>() {
         delay.serialize(s)
     } else if let Some(flakey) = a.downcast_ref::<detail::Flakey>() {
         flakey.serialize(s)
+    } else if let Some(maxsize) = a.downcast_ref::<detail::MaxSize>() {
+        maxsize.serialize(s)
     } else {
         panic!("Unsupported dynamic type!");
     }
@@ -100,7 +128,7 @@ impl DefinedEffect {
         }
 
         let (sname, effect): (&'static str, Box<dyn Effect>) = match_effect! {
-            "delay" => detail::Delay, "flakey" => detail::Flakey
+            "delay" => detail::Delay, "flakey" => detail::Flakey, "maxsize" => detail::MaxSize
         };
         Ok(DefinedEffect {
             name: sname.to_owned(),
@@ -111,11 +139,11 @@ impl DefinedEffect {
 }
 
 #[derive(Default, Serialize)]
-pub struct EffectGroup {
+pub struct Group {
     effects: Vec<DefinedEffect>,
 }
 
-impl<'a> IntoIterator for &'a EffectGroup {
+impl<'a> IntoIterator for &'a Group {
     type Item = &'a DefinedEffect;
     type IntoIter = std::slice::Iter<'a, DefinedEffect>;
     fn into_iter(self) -> Self::IntoIter {
@@ -123,7 +151,7 @@ impl<'a> IntoIterator for &'a EffectGroup {
     }
 }
 
-impl EffectGroup {
+impl Group {
     pub fn clear(&mut self) {
         self.effects.clear();
     }
@@ -138,15 +166,19 @@ impl EffectGroup {
     }
 }
 
-pub fn run(tree: &Tree, ino: Ino, fop: OpType) -> (u64, Option<ErrNo>) {
+pub fn run<'a>(
+    it: impl Iterator<Item = &'a crate::ftypes::Node>,
+    mut ctx: Context,
+) -> (u64, Option<ErrNo>) {
     let mut sleep_ms: u64 = 0;
     let mut first_errno: Option<ErrNo> = None;
-    'outer: for node in tree.climb(ino) {
+    'outer: for node in it {
+        ctx.origin = node.attr.ino as Ino;
         for DefinedEffect { effect, op, .. } in &node.effects {
-            if (fop & *op).is_empty() {
+            if (ctx.op.optype() & *op).is_empty() {
                 continue;
             }
-            match effect.apply() {
+            match effect.apply(&mut ctx) {
                 EffectResult::Ack => (),
                 EffectResult::Error(errno) => {
                     first_errno = Some(errno);

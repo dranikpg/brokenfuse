@@ -2,7 +2,7 @@ use fuser::FileAttr;
 use serde::Serialize;
 use std::cell::Cell;
 
-use crate::effect::EffectGroup;
+use crate::effect::Group;
 use crate::storage::Storage;
 
 pub type Ino = usize;
@@ -85,5 +85,5 @@ pub struct Node {
     pub parent: usize,
     pub attr: FileAttr,
     pub item: NodeItem,
-    pub effects: EffectGroup,
+    pub effects: Group,
 }

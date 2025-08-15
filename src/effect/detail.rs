@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::{
-    effect::{Effect, EffectResult},
+    effect::{Context, Effect, EffectResult, OpDesr},
     ftypes::ErrNo,
 };
 
@@ -14,7 +14,7 @@ pub struct Delay {
 }
 
 impl Effect for Delay {
-    fn apply(&self) -> EffectResult {
+    fn apply(&self, _ctx: &mut Context) -> EffectResult {
         EffectResult::Delay(self.duration_ms)
     }
 
@@ -50,7 +50,7 @@ impl Flakey {
 }
 
 impl Effect for Flakey {
-    fn apply(&self) -> EffectResult {
+    fn apply(&self, ctx: &mut Context) -> EffectResult {
         let ret = |b| {
             if b {
                 EffectResult::Error(self.errno)
@@ -60,16 +60,55 @@ impl Effect for Flakey {
         };
         match self.cond {
             FlakeyCondition::Always { always } => ret(always),
-            FlakeyCondition::Prob { prob } => ret(rand::rng().random::<f32>() <= prob),
+            FlakeyCondition::Prob { prob } => ret(ctx.rgen.random::<f32>() <= prob),
             FlakeyCondition::Interval { avail, unavail } => {
                 let passed_ms = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap()
-                    .as_millis();             
+                    .as_millis();
 
                 let rem = (passed_ms) % ((avail + unavail) as u128);
                 ret(rem <= avail as u128)
             }
+        }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        return self;
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct MaxSize {
+    limit: usize,
+}
+
+impl Effect for MaxSize {
+    fn apply(&self, ctx: &mut Context) -> EffectResult {
+        let (offset, len) = match &ctx.op {
+            OpDesr::Write { offset, len } => (offset, len),
+            _ => return EffectResult::Ack,
+        };
+
+        // Determine by how much file would need to grow
+        let file_size = ctx.tree.get(ctx.target).unwrap().attr.size;
+        let need_grow = (offset + len) as i64 - file_size as i64;
+        if need_grow < 0 {
+            return EffectResult::Ack;
+        }
+
+        // Determine subtree size
+        let total_size = ctx
+            .tree
+            .traverse(ctx.origin)
+            .filter(|n| n.attr.kind == fuser::FileType::RegularFile)
+            .map(|n| n.attr.size as i64)
+            .sum::<i64>();
+
+        if total_size + need_grow > self.limit as i64 {
+            EffectResult::Error(libc::ENOSPC)
+        } else {
+            EffectResult::Ack
         }
     }
 

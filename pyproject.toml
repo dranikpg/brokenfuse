@@ -27,4 +27,4 @@ Homepage = "https://github.com/dranikpg/brokenfuse"
 [[tool.setuptools-rust.bins]]
 target = "brokenfuse"
 path = "Cargo.toml"
-args = ["--release"]
+args = []
