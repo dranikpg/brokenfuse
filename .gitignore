@@ -1,1 +1,7 @@
 target/
+
+# Pythonic
+__pycache__/
+build/
+*.egg-info/
+*.egg

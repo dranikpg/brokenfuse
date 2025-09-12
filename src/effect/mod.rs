@@ -41,6 +41,11 @@ pub struct Context<'a> {
 pub trait Effect {
     fn apply(&self, ctx: &mut Context) -> EffectResult;
     fn as_any(&self) -> &dyn Any;
+
+    // Response to getfattr of this effect
+    fn display(&self) -> Option<String> {
+        None
+    }
 }
 
 bitflags! {
@@ -128,7 +133,8 @@ impl DefinedEffect {
         }
 
         let (sname, effect): (&'static str, Box<dyn Effect>) = match_effect! {
-            "delay" => detail::Delay, "flakey" => detail::Flakey, "maxsize" => detail::MaxSize
+            "delay" => detail::Delay, "flakey" => detail::Flakey, "maxsize" => detail::MaxSize,
+            "heatmap" => detail::HeatMap
         };
         Ok(DefinedEffect {
             name: sname.to_owned(),
@@ -163,6 +169,10 @@ impl Group {
     pub fn add(&mut self, nde: DefinedEffect) {
         self.remove(&nde.name);
         self.effects.push(nde);
+    }
+
+    pub fn find(&self, name: &str) -> Option<&DefinedEffect> {
+        self.effects.iter().find(|de| de.name == name)
     }
 }
 

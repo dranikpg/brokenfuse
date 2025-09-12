@@ -1,49 +1,86 @@
 ### Broken Fuse 🔌💥⚡
 
-> You need to test your applications ability to handle i/o issues: 
->   1. _Mock_ your storage layer. At what level? libc? Higher? How do I test i/o code then? 🤦
->   2. _LD_PRELOAD_... Did you know glibc's fopen calls __open? What about io_uring interception? no_std? 🙄
->   3. Stumble upon _dmsetup_. Loopback device, block device, block size, mke2fs, mount... 😮‍💨 suspend, reload, resume... what block offset is base.db at? AAAHH 😠 dmsetup message x123... Now your CD drive opens. What, heck, you still have that one? SMASH IT 👊 Calm down 😤 Proceeed to (4)
->   4. Use Broken Fuse 😎
+> How does your application respond to i/o issues? You don't want to mock your i/o layer, it's what you're testing after all. 
+> So you stumble upon  _dmsetup_. Loopback device, block device, block size, mke2fs, mount... 😮‍💨 suspend, reload, resume... what block offset is base.db at? 
+> AAAHH 😠 dmsetup message x123... Now your CD drive opens. What, heck, you still have that one? SMASH IT 👊 Calm down 😤 Properly mock your filesystem.
 
-Broken Fuse is built on top of [FUSE](https://www.kernel.org/doc/html/next/filesystems/fuse.html) (Filesystem in userspace) and provides high-level io fault injection.
+Broken fuse is a user-space filesystem built on top of [FUSE](https://www.kernel.org/doc/html/next/filesystems/fuse.html) 
+that provides high-level io fault injection. It's not the first of its kind, so what makes it different? It's easy to use:
+
+* Imperative configuration based on [extended attributes](https://wiki.archlinux.org/title/Extended_attributes) applied directly to the file tree. 
+No sockets, no config files, no regexes, nothing!
+* Pythonic wrapper to pull it into intergration tests as a single dependency
+* Broad options: fail operations based on probability, on availability time, limit subtree sizes, delay specific operations, compute operation heatmaps... and mix and match everything as you like!
 
 It is intended _exclusively for testing_, never use it for performance and security sensitive cases!
 
-#### Quick intro
+### Quick intro (Python)
+
+Mount it as an in-memory filesystem with the provided context manager.
+
+```py
+import brokenfuse as bf
+with bf.Fuse('/mnt/fuse'):
+  # just a passthrough filesystem
+```
+
+"Effects" are applied to all file operations of the subtree they're attached to. Their scope can also be limited by the operation kind - read or write. Let's look at a small example for altering the behaviour of a single file:
+```py
+f = open('/mnt/fuse/test.txt', 'a')
+# Delay reads to it by one second
+ef_delay = bf.Delay(timedelta(seconds=1), op='r')
+bf.attach(f, ef_delay)
+# Make 50% of writes fail
+bf.attach(f, bf.Flakey(0.5, op='w'))
+# Observe effects ...
+some_code_reading_writing(f)
+# Remove delay effect
+bf.remove(f, ef_delay)
+# Remove all effects. We can also pass a path instead of the file
+bf.clear('mnt/fuse/test.txt')
+# Quickly check stats
+bf.stats(f)
+```
+
+That's it!
+
+### Quick intro (Binary)
+
+Start the binary and pass the mounth path
+
 ```sh
 ./brokenfuse /mnt/testfs
-cd /mnt/testfs
-echo 'works' > test.txt
-cat test.tx
-> works
 ```
 
-Lets verify cat does indeed read our file and not just guess its content.
+The python wrapper just translates the options to xattr calls with json objects. Repeating the example from above: 
 
 ```sh
-getfattr test.txt --only-values -n bk.stats
-> {"reads":1,"read_volume":6,"writes":1,"write_volume":6,"errors":0}
+setfattr test.txt -n bf.effect.delay -v '{"op":"r", "duration_ms":1000}'
+setfattr test.txt -n bf.effect.flakey -v '{"op":"w", "prob": 0.5}' 
 ```
 
-Let's hold the 🐈‍⬛ back, reads only for now
+The effect name (the part after `bf.effect.`) determines its type. You can use a hyphen (like this `delay-1`, `delay-two`) to use multiple effects of the same type on the same node.
+
+Deleting an attribute deletes the effect. Deleting `bf.effect` delets all effects.
 
 ```sh
-setfattr test.txt -n bk.effect.delay -v '{"op":"r","millis":1000}'
-time cat test.txt
-> 1.0006 total
-time (echo 'more text' >> test.txt)
-> 0.001 total
+setfattr test.txt -x bf.effect.delay
+setfattr test.txt -x bf.effect
 ```
 
-Effects applied to parent folders are inherited. Let's complicate writing to our filesystem
+You can also query a files own effects and all effects applied to it (up the tree).
 
 ```sh
-setfattr . -n bk.effect.flakey -v '{"op":"w", "prob": 0.5}'      # fail writes with 50% chance in folder
-echo 'more text' >> test.txt
-> echo: write error: Input/output error
-echo 'more text' >> test.txt
-> 
+getfattr test.txt -n bf.effect
+getfattr test.txt -n bf.effect/all
 ```
 
-Cool. 
+### Effects
+
+1. Delay `{duration_ms: }`. Delay operations by given number of milliseconds
+2. Flakey. Return error based on condition. By default returns errno=5 (Input/output error).
+    * `{prob: 0.6, errno: 11}` - return error with 60% prob
+    * `{avail: 100, unavail: 200}` - 100ms no errors, 200ms errors in successive intervals
+3. Max size `{limit: }`. Limit the subtree size in bytes. Any write spilling over will return ENOSPC.
+4. Heatmap `{algin: }`. Build operation heatmap, rounding offset/length to align. Query with getfattr to get data points.
+5. Quota `{limit: , align: }` Limit volume of subtree operations, return EDQUOT once exceeded. Round operations up to align.

@@ -27,6 +27,10 @@ pub fn get(tree: &Tree, ino: Ino, name: &str) -> Option<String> {
                 .collect();
             Some(serde_json::to_string(&all_effects).unwrap())
         }
+        name if name.starts_with("bf.effect.") => {
+            let name = name.strip_prefix("bf.effect.")?;
+            tree.get(ino as Ino)?.effects.find(name)?.effect.display()
+        }
         _ => None,
     }
 }

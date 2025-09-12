@@ -1,6 +1,6 @@
 ## Integration testing
 
-Integration is mainly based on stealing tests from open source file system test suites or file system mocking libraries :) 
+Integration is mainly based on stealing tests from open source file system test suites or file system mocking libraries :) Brokenfuse is just ran as a passthrough filesystem.
 
 Define the env var `BFPATH` to point to a mounted broken fuse and run any of the provided shell scripts for testing.
 

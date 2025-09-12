@@ -611,6 +611,8 @@ fn main() {
         rand::rngs::StdRng::from_os_rng()
     };
 
+    println!("Running brokenfuse");
+
     fuser::mount2(
         TestFS {
             tree,
