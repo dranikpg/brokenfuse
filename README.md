@@ -7,7 +7,7 @@
 Broken fuse is a user-space filesystem built on top of [FUSE](https://www.kernel.org/doc/html/next/filesystems/fuse.html) 
 that provides high-level io fault injection. It's not the first of its kind, so what makes it different? It's easy to use:
 
-* Imperative configuration based on [extended attributes](https://wiki.archlinux.org/title/Extended_attributes) applied directly to the file tree. 
+* Imperative configuration based on [extended attributes](https://wiki.archlinux.org/title/Extended_attributes) applied directly to nodes. 
 No sockets, no config files, no regexes, nothing!
 * Pythonic wrapper to pull it into intergration tests as a single dependency
 * Broad options: fail operations based on probability, on availability time, limit subtree sizes, delay specific operations, compute operation heatmaps... and mix and match everything as you like!
@@ -26,20 +26,16 @@ with bf.Fuse('/mnt/fuse'):
 
 "Effects" are applied to all file operations of the subtree they're attached to. Their scope can also be limited by the operation kind - read or write. Let's look at a small example for altering the behaviour of a single file:
 ```py
-f = open('/mnt/fuse/test.txt', 'a')
-# Delay reads to it by one second
-ef_delay = bf.Delay(timedelta(seconds=1), op='r')
-bf.attach(f, ef_delay)
-# Make 50% of writes fail
-bf.attach(f, bf.Flakey(0.5, op='w'))
-# Observe effects ...
-some_code_reading_writing(f)
-# Remove delay effect
-bf.remove(f, ef_delay)
-# Remove all effects. We can also pass a path instead of the file
-bf.clear('mnt/fuse/test.txt')
-# Quickly check stats
-bf.stats(f)
+f = open('/mnt/fuse/test.txt', 'a') # Create new file
+
+ef_delay = bf.Delay(timedelta(seconds=1), op='r') 
+bf.attach(f, ef_delay)                # Delay reads to it by one second
+bf.attach(f, bf.Flakey(0.5, op='w'))  # Make 50% of writes fail
+some_code_reading_writing(f)          # Observe effects ...
+
+bf.remove(f, ef_delay)        # Remove delay effect
+bf.clear('mnt/fuse/test.txt') # Remove all effects. We can also pass a path instead of the file
+bf.stats(f)                   # Quickly check stats
 ```
 
 That's it!
@@ -84,3 +80,9 @@ getfattr test.txt -n bf.effect/all
 3. Max size `{limit: }`. Limit the subtree size in bytes. Any write spilling over will return ENOSPC.
 4. Heatmap `{algin: }`. Build operation heatmap, rounding offset/length to align. Query with getfattr to get data points.
 5. Quota `{limit: , align: }` Limit volume of subtree operations, return EDQUOT once exceeded. Round operations up to align.
+
+#### See as well
+
+* https://github.com/ligurio/unreliablefs
+* https://github.com/dsrhaslab/lazyfs
+* https://github.com/scylladb/charybdefs
